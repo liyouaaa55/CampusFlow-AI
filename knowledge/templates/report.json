@@ -1,0 +1,12 @@
+{
+  "_comment": "报告结构模板：ReportAgent 读取本文件作为报告标题与章节标题，改这里就能调整报告口径，无需改代码。文件缺失或损坏时自动回退到代码内置标题，不会报错。",
+  "weekly_title": "本周事务闭环执行报告",
+  "department_title": "{department} 事务闭环执行报告",
+  "sections": {
+    "overview": "一、总体概况",
+    "departments": "二、部门统计",
+    "tasks": "二、任务明细",
+    "risk": "三、风险事项（仅紧急与逾期）",
+    "suggestions": "四、AI分析建议"
+  }
+}

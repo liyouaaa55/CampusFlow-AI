@@ -1,0 +1,16 @@
+# Streamlit 运行与主题配置（本地与 Streamlit Cloud 通用）
+[theme]
+base = "light"
+primaryColor = "#1f6feb"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f5f7fa"
+textColor = "#1f2328"
+font = "sans serif"
+
+[server]
+headless = true
+# 上传文件大小上限（MB）
+maxUploadSize = 20
+
+[browser]
+gatherUsageStats = false

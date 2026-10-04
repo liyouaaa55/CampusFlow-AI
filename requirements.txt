@@ -1,0 +1,24 @@
+# CampusFlow AI 依赖清单（Python 3.10）
+#
+# 安装：pip install -r requirements.txt
+# 完整版本锁定（含全部间接依赖，比赛备用/离线复现）见 requirements-lock.txt
+# 部署说明见 docs/DEPLOY.md
+
+# ---------- 前端 ----------
+# 版本必须钉死：界面样式依赖 1.37.1 的组件结构（data-testid），
+# 升级大版本可能导致上传区中文化、侧边栏导航样式失效。
+streamlit==1.37.1
+
+# ---------- 大模型（OpenAI 兼容协议：硅基流动 / DeepSeek 等）----------
+# 不设上限：已在 openai 3.x 实测通过，避免大版本被无谓限制。
+openai>=1.40
+python-dotenv>=1.0,<2.0
+
+# ---------- 文档解析 ----------
+python-docx>=1.1,<2.0        # Word .docx
+pdfplumber>=0.11,<0.12       # PDF 文本抽取
+pandas>=2.1,<3.0             # Excel / 表格处理
+openpyxl>=3.1,<4.0           # Excel 引擎
+
+# ---------- 测试 ----------
+pytest>=8.0

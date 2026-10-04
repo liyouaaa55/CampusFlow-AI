@@ -1,0 +1,5 @@
+# 该目录存放规则数据（JSON 格式）。
+# 计划文件：
+#   priority_rules.json  关键词 → 优先级（安全/消防 → high，教学/活动 → medium）
+#   reminder_rules.json  提醒阈值（3 天临期、1 天紧急、逾期红色）
+# 本阶段仅占位，数据在第 6 阶段补充。
