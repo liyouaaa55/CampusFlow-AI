@@ -16,17 +16,21 @@ from typing import Any, Mapping, Sequence
 
 from config import settings
 
-# 缺省级别显示名：仅在调用方未提供 labels 时兜底
+# 缺省级别显示名：仅在调用方未提供 labels 时兜底。
+#
+# 权威来源是 knowledge/rules/reminder.json 的 label（由 reminder_agent.level_label()
+# 读取）。此处保留一份静态副本，只为在知识库文件缺失时仍能渲染报告；
+# tests/test_ui_labels.py 会断言本表与 reminder.json 完全一致，防止两处漂移。
 DEFAULT_LEVEL_LABELS: dict[str, str] = {
     "normal": "正常",
-    "due_soon": "临期",
-    "urgent": "紧急",
+    "due_soon": "即将到期",
+    "urgent": "临期",
     "overdue": "已逾期",
 }
 
 # 空数据提示
 EMPTY_REMINDER_TEXT: str = "暂无需要提醒的任务。"
-EMPTY_RISK_TEXT: str = "暂无紧急或逾期事项。"
+EMPTY_RISK_TEXT: str = "暂无临期或已逾期事项。"
 EMPTY_TASK_TEXT: str = "暂无任务记录。"
 
 # 报告数据来源说明

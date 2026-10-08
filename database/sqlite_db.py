@@ -16,8 +16,16 @@
     get_task(task_id)                          按主键查询
     list_tasks(status, department)              列表查询（支持筛选）
     update_status(task_id, status, operator, remark)  改状态（自动写同状态名日志）
+    update_risk_level(task_id, risk_level, operator, remark)  改风险等级（自动写 escalate 日志）
+    append_log(task_id, action, operator, remark)  追加一条日志（不改 tasks 表）
     delete_task(task_id)                       删除任务及其日志
     get_logs(task_id)                          查询某任务的全部操作历史
+
+并发约定（v2.0）：
+    - CONNECTION_TIMEOUT：写锁等待时间，避免并发写直接报 database is locked；
+    - WAL 日志模式：读写不互斥；
+    - update_status / update_risk_level 均带乐观锁，冲突时抛
+      ConcurrentUpdateError，绝不静默覆盖他人修改。
 """
 
 from __future__ import annotations
@@ -34,6 +42,17 @@ from database import models
 # 默认数据库文件：<项目根>/data/campusflow.db
 DB_PATH: Path = settings.DB_PATH
 
+# 写锁等待时间（秒）。
+# 作用：多个连接同时写入时，SQLite 默认会立即返回 "database is locked"。
+# 设为 10 秒后，写方先等待锁释放，显著降低「并发写」场景下的失败率。
+# 该参数等价于 PRAGMA busy_timeout，作用于每一次新建连接。
+CONNECTION_TIMEOUT: float = 10.0
+
+# 是否启用 WAL（Write-Ahead Logging，预写日志）模式。
+# 收益：读写不互斥，多读者与单写者可并发，写入吞吐优于默认回滚日志。
+# 代价：数据库文件旁会额外出现 <db>-wal 与 <db>-shm 两个文件（由 SQLite 自动管理）。
+WAL_MODE_ENABLED: bool = True
+
 
 class DatabaseError(RuntimeError):
     """数据层异常基类。"""
@@ -41,6 +60,14 @@ class DatabaseError(RuntimeError):
 
 class TaskNotFoundError(DatabaseError):
     """指定的任务不存在（更新状态时必须报错，避免静默失败）。"""
+
+
+class ConcurrentUpdateError(DatabaseError):
+    """并发冲突：目标记录在本次读取之后已被其他操作修改，写入被拒绝。
+
+    用于乐观锁失败时的显式报错——宁可让调用方知道「有人抢先改过」，
+    也绝不静默覆盖他人的修改结果。
+    """
 
 
 # ============================================================
@@ -59,14 +86,18 @@ def get_connection(db_path: str | Path | None = None) -> Iterator[sqlite3.Connec
 
     - 自动创建目录与数据表（幂等），避免「no such table」类错误；
     - 开启外键约束（SQLite 默认关闭），保证删除任务时日志级联清理；
-    - 正常退出自动提交，异常自动回滚。
+    - 设置 CONNECTION_TIMEOUT 写锁等待时间，避免并发写直接失败；
+    - 启用 WAL 日志模式，降低读写互相阻塞的概率；
+    - 正常退出自动提交，异常自动回滚（保证「写数据 + 写日志」原子性）。
     """
     path = resolve_db_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    connection = sqlite3.connect(str(path))
+    connection = sqlite3.connect(str(path), timeout=CONNECTION_TIMEOUT)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    if WAL_MODE_ENABLED:
+        connection.execute("PRAGMA journal_mode = WAL")
 
     try:
         # 幂等建表：保证任何入口首次调用都能直接使用
@@ -171,8 +202,17 @@ def update_status(
     例：update_status(1, "completed", operator="李老师", remark="活动已完成")
         自动新增日志：action="completed", operator="李老师", remark="活动已完成"
 
+    并发保护：UPDATE 的 WHERE 条件带上「读取时的原状态」（乐观锁）。
+    若本函数读取之后、写入之前该状态已被其他连接改过，WHERE 不再匹配、
+    实际更新行数为 0，此时抛 ConcurrentUpdateError，绝不静默覆盖他人结果。
+    注意：status 的业务语义不变——urgent / overdue 仍是由 deadline 推导出的
+    提醒级别，不是风险等级（风险等级见 risk_level / models.RISK_LEVELS）。
+
     返回：更新后的完整记录。
-    异常：ValueError 状态非法；TaskNotFoundError 任务不存在。
+    异常：
+        ValueError            状态非法；
+        TaskNotFoundError     任务不存在；
+        ConcurrentUpdateError 期间状态被其他操作修改。
     """
     _validate_status(status, field="status")
 
@@ -182,10 +222,16 @@ def update_status(
         if existing is None:
             raise TaskNotFoundError(f"任务不存在：id={task_id}")
 
-        connection.execute(
-            "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
-            (status, timestamp, int(task_id)),
+        previous_status = existing["status"]
+        cursor = connection.execute(
+            "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ? AND status IS ?",
+            (status, timestamp, int(task_id), previous_status),
         )
+        if cursor.rowcount == 0:
+            raise ConcurrentUpdateError(
+                f"任务 #{task_id} 的状态已被其他操作修改"
+                f"（期望 {previous_status!r}），本次更新已取消，请重新读取后再试。"
+            )
         _insert_log(
             connection,
             task_id=int(task_id),
@@ -196,6 +242,116 @@ def update_status(
         updated = _fetch_task(connection, task_id)
 
     return _row_to_dict(updated)
+
+
+def update_risk_level(
+    task_id: int,
+    risk_level: str,
+    operator: str = models.DEFAULT_OPERATOR,
+    remark: str = "",
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """更新任务风险等级（risk_level），并自动写入一条 escalate 日志。
+
+    用途：v2.0「提级督办（ESCALATE）」动作的唯一执行入口，
+    例：update_risk_level(1, "red", operator="张老师", remark="逾期 2 天未推进")
+        自动新增日志：action="escalate", operator="张老师", remark="逾期 2 天未推进"
+
+    严格边界：
+    1. 只修改 risk_level 一个字段，绝不触碰 owner / department / deadline /
+       title / status；
+    2. risk_level 只能取 models.RISK_LEVELS（green / yellow / red），
+       它与「由 deadline 推导的 status.urgent / status.overdue」是两个独立概念，
+       不可混用；
+    3. UPDATE 与日志写入在同一事务内（由 get_connection 统一提交或回滚），
+       不会出现「改了数据却没留痕」或「留了痕却没改数据」；
+    4. 乐观锁：UPDATE 的 WHERE 条件带上「读取时的原 risk_level」，
+       期间被其他连接改过则实际更新行数为 0，抛 ConcurrentUpdateError。
+
+    说明：按 v2.0 事件契约，本函数写入的日志 action 固定为 models.ACTION_ESCALATE
+    （即 "escalate"），与 risk_level 的具体目标值无关。
+    analyze / confirm 等其余事件由后续处置流程自行写入，本函数不代劳。
+
+    返回：更新后的完整记录。
+    异常：
+        ValueError            风险等级非法；
+        TaskNotFoundError     任务不存在；
+        ConcurrentUpdateError 期间风险等级被其他操作修改。
+    """
+    _validate_risk_level(risk_level, field="risk_level")
+
+    timestamp = now_iso()
+    with get_connection(db_path) as connection:
+        existing = _fetch_task(connection, task_id)
+        if existing is None:
+            raise TaskNotFoundError(f"任务不存在：id={task_id}")
+
+        previous_risk = existing["risk_level"]
+        cursor = connection.execute(
+            "UPDATE tasks SET risk_level = ?, updated_at = ? WHERE id = ? AND risk_level IS ?",
+            (risk_level, timestamp, int(task_id), previous_risk),
+        )
+        if cursor.rowcount == 0:
+            raise ConcurrentUpdateError(
+                f"任务 #{task_id} 的风险等级已被其他操作修改"
+                f"（期望 {previous_risk!r}），本次提级已取消，请重新读取后再试。"
+            )
+        _insert_log(
+            connection,
+            task_id=int(task_id),
+            action=models.ACTION_ESCALATE,
+            operator=operator,
+            remark=remark,
+        )
+        updated = _fetch_task(connection, task_id)
+
+    return _row_to_dict(updated)
+
+
+def append_log(
+    task_id: int,
+    action: str,
+    operator: str = models.DEFAULT_OPERATOR,
+    remark: str = "",
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """追加一条任务操作日志，**不修改 tasks 表任何字段**。
+
+    用途：v2.0「事务事件记忆」的写入口。create / 状态变更 / escalate 三类日志
+    已有各自的专用接口（create_task、update_status、update_risk_level），
+    而 analyze / draft / request / confirm / reject 这类**不改动任务数据**的
+    事件，需要一个独立的追加入口来留痕。
+
+    与既有写接口的关键差异：
+    1. **不触碰 tasks 表**——不修改任何业务字段，也不刷新 updated_at。
+       「发生了一件事」不等于「任务数据变了」，两者必须分开记账。
+    2. action 必须属于 models.LOG_ACTIONS（状态值 + 事务事件），否则直接报错。
+    3. 任务不存在时抛 TaskNotFoundError，绝不留下孤儿子键日志。
+
+    返回：刚写入的那条日志记录。
+    异常：ValueError action 非法；TaskNotFoundError 任务不存在。
+    """
+    _validate_log_action(action)
+
+    with get_connection(db_path) as connection:
+        existing = _fetch_task(connection, task_id)
+        if existing is None:
+            raise TaskNotFoundError(f"任务不存在：id={task_id}")
+
+        _insert_log(
+            connection,
+            task_id=int(task_id),
+            action=action,
+            operator=operator,
+            remark=remark,
+        )
+        row = connection.execute(
+            f"SELECT {', '.join(models.TASK_LOG_COLUMNS)} FROM {models.TABLE_TASK_LOGS} "
+            "WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            (int(task_id),),
+        ).fetchone()
+
+    return dict(row)
 
 
 def delete_task(task_id: int, db_path: str | Path | None = None) -> bool:
@@ -375,6 +531,31 @@ def _validate_status(status: Any, field: str = "status") -> None:
     if status not in models.TASK_STATUSES:
         raise ValueError(
             f"{field} 非法：{status!r}（允许值：{'/'.join(models.TASK_STATUSES)}）"
+        )
+
+
+def _validate_risk_level(risk_level: Any, field: str = "risk_level") -> None:
+    """校验风险等级取值，非法直接报错。
+
+    风险等级只允许 models.RISK_LEVELS（green / yellow / red）。
+    特别提醒：status 中的 urgent / overdue 是「由 deadline 推导的提醒级别」，
+    不是风险等级，不允许传入这里。
+    """
+    if risk_level not in models.RISK_LEVELS:
+        raise ValueError(
+            f"{field} 非法：{risk_level!r}（允许值：{'/'.join(models.RISK_LEVELS)}）"
+        )
+
+
+def _validate_log_action(action: Any, field: str = "action") -> None:
+    """校验日志动作取值，非法直接报错。
+
+    允许集合 models.LOG_ACTIONS = 新建 + 全部状态值 + 全部事务事件。
+    这样可以防止调用方把自由文本写进 action 列，污染事件链的可审计性。
+    """
+    if action not in models.LOG_ACTIONS:
+        raise ValueError(
+            f"{field} 非法：{action!r}（允许值：{'/'.join(models.LOG_ACTIONS)}）"
         )
 
 

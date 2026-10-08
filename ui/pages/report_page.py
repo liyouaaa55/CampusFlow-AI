@@ -18,6 +18,7 @@ import pandas as pd
 import streamlit as st
 
 from agent import reminder_agent, report_agent
+from ui import labels
 from ui.components import cards, styles
 
 # 页面标题与副标题
@@ -77,7 +78,8 @@ def _leader_lines(dashboard: Mapping[str, Any], reminders: Sequence[Mapping[str,
     """领导摘要文案：先给结论数字，再给处置建议（全部取自既有接口输出）。"""
     first = (
         f"本周共执行 {dashboard['total']} 项任务，完成率 {dashboard['completion_rate']}%，"
-        f"其中逾期 {dashboard['overdue']} 项、紧急 {dashboard['urgent']} 项。"
+        f"其中{labels.level_label('overdue')} {dashboard['overdue']} 项、"
+        f"{labels.level_label('urgent')} {dashboard['urgent']} 项。"
     )
 
     focus = [item for item in reminders if item.get("level") in FOCUS_LEVELS]
@@ -96,7 +98,9 @@ def _leader_lines(dashboard: Mapping[str, Any], reminders: Sequence[Mapping[str,
         clauses.append(f"建议优先督办{top.get('department') or '相关'}的「{top.get('title') or '重点事项'}」")
     if due_soon_department:
         prefix = "并" if clauses else "建议"
-        clauses.append(f"{prefix}协调{due_soon_department}完成临期事项")
+        clauses.append(
+            f"{prefix}协调{due_soon_department}完成{labels.level_label('due_soon')}事项"
+        )
     if not clauses:
         clauses.append("各项任务按计划有序推进")
 
@@ -126,8 +130,8 @@ def _render_summary_cards(
             },
             {
                 "label": "风险事项",
-                "value": f"{dashboard['overdue']} 项逾期",
-                "desc": f"另有 {dashboard['urgent']} 项紧急待跟进",
+                "value": f"{dashboard['overdue']} 项{labels.level_label('overdue')}",
+                "desc": f"另有 {dashboard['urgent']} 项{labels.level_label('urgent')}待跟进",
                 "color": styles.DANGER,
             },
             {

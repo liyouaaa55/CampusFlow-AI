@@ -103,9 +103,22 @@ def test_extract_normal_meeting() -> None:
     json.dumps(tasks, ensure_ascii=False)
 
 
-def test_status_is_always_pending() -> None:
-    """识别阶段状态固定为 pending，模型乱填也会被强制覆盖。"""
+def test_status_follows_material_expression() -> None:
+    """状态取自材料的明确表达，而不是被强制写死为 pending。
+
+    业务口径变更（v2.0 修复 P0-1 / P0-2）：
+        此前本测试断言「状态恒为 pending」，把「汇报材料中的已完成事项被
+        改写成待办」这个缺陷固化成了规范。修正后：材料明确写 completed
+        就应当是 completed，否则历史完成事项会变成凭空新增的待办任务。
+    """
     payload = [{"title": "整理实验室安全台账", "status": "completed", "priority": "high"}]
+    tasks = task_agent.extract_tasks("实验室安全台账整理", llm_fn=make_fake_llm(payload))
+    assert tasks[0]["status"] == "completed"
+
+
+def test_status_defaults_to_pending_when_not_stated() -> None:
+    """材料未明确表达状态时落回默认待办，且不猜测为已完成/进行中。"""
+    payload = [{"title": "整理实验室安全台账", "priority": "high"}]
     tasks = task_agent.extract_tasks("实验室安全台账整理", llm_fn=make_fake_llm(payload))
     assert tasks[0]["status"] == "pending"
 

@@ -12,7 +12,7 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
-from config import settings
+from ui import labels
 from ui.components import styles
 
 # ---------- 任务表列名 ----------
@@ -39,51 +39,55 @@ TASK_TABLE_COLUMNS: tuple[str, ...] = (
 # ---------- 日志表列名 ----------
 LOG_COLUMNS: tuple[str, ...] = ("操作时间", "动作", "操作人", "备注")
 
-# 界面用状态中文名：在全局配置基础上，把 urgent 显示为「紧急」以贴近督办口径
-UI_STATUS_LABELS: dict[str, str] = {**settings.STATUS_LABELS, "urgent": "紧急"}
+# 界面用状态中文名：在全局配置基础上，把 urgent 显示为「临期」以贴近督办口径
+UI_STATUS_LABELS: dict[str, str] = dict(labels.STATUS_LABELS_DISPLAY)
 
 # 风险等级中文徽章文案（与 PlannerAgent 的 green / yellow / red 对应）
 RISK_LABELS: dict[str, str] = dict(styles.RISK_LABELS)
 
 # 未评估时的占位文案
-UNKNOWN_TEXT: str = "—"
+UNKNOWN_TEXT: str = labels.UNKNOWN_TEXT
 
 
 # ============================================================
 # 一、标签映射
+#
+# 全部转发到 ui.labels —— 显示层中文映射的唯一来源。
+# 本模块保留同名薄封装，仅为维持既有调用点不变。
 # ============================================================
 
 
 def status_label(status: str | None) -> str:
-    """状态中文名（urgent 显示为「紧急」）。"""
-    if not status:
-        return UNKNOWN_TEXT
-    return UI_STATUS_LABELS.get(status, status)
+    """状态中文名（urgent 显示为「临期」）。"""
+    return labels.status_label(status)
 
 
 def priority_label(priority: str | None) -> str:
     """优先级中文名（高 / 中 / 低）。"""
-    if not priority:
-        return UNKNOWN_TEXT
-    return settings.PRIORITY_LABELS.get(priority, priority)
+    return labels.priority_label(priority)
+
+
+def log_action_label(action: str | None) -> str:
+    """日志动作中文名（含 v2.0 事务事件：智能分析 / 提级督办 等）。
+
+    取不到映射时返回占位符「—」而非原始英文，避免内部枚举泄漏到界面。
+    """
+    return labels.log_action_label(action)
 
 
 def risk_label(risk: str | None) -> str:
-    """风险等级中文名（正常 / 需确认 / 高风险）。"""
-    key = (risk or "").strip()
-    if not key:
-        return UNKNOWN_TEXT
-    return RISK_LABELS.get(key, key)
+    """风险等级中文名（低风险 / 中风险 / 高风险）。"""
+    return labels.risk_label(risk)
 
 
 def status_options() -> dict[str, str]:
     """状态下拉选项：{中文标签: 枚举值}（顺序与枚举定义一致）。"""
-    return {UI_STATUS_LABELS[value]: value for value in settings.TASK_STATUSES}
+    return {UI_STATUS_LABELS[value]: value for value in labels.STATUS_ORDER}
 
 
 def priority_options() -> dict[str, str]:
     """优先级下拉选项：{中文标签: 枚举值}。"""
-    return {settings.PRIORITY_LABELS[value]: value for value in settings.PRIORITIES}
+    return {labels.PRIORITY_LABELS[value]: value for value in labels.PRIORITY_ORDER}
 
 
 def risk_options() -> dict[str, str]:
@@ -160,15 +164,33 @@ def _risk_cell_style(value: Any) -> str:
 # ============================================================
 
 
+LOG_REMARK_MAX_LENGTH: int = 60
+
+
+def _truncate_remark(remark: Any) -> str:
+    """日志备注 → 表格显示文本（限长；空值走占位符）。"""
+    text = str(remark or "").strip()
+    if not text:
+        return UNKNOWN_TEXT
+    if len(text) <= LOG_REMARK_MAX_LENGTH:
+        return text
+    return text[: LOG_REMARK_MAX_LENGTH - 1] + "…"
+
+
 def logs_dataframe(logs: Sequence[Mapping[str, Any]]) -> pd.DataFrame:
-    """操作日志 → DataFrame（动作中文化）。"""
+    """操作日志 → DataFrame（动作中文化）。
+
+    动作列统一走 log_action_label()：同时覆盖状态类动作（pending / completed …）
+    与 v2.0 事务事件（analyze / escalate …），未映射时返回「—」而非英文原值。
+    备注列做长度截断，避免 analyze 事件的长摘要撑爆日志表格。
+    """
     return pd.DataFrame(
         [
             {
                 "操作时间": log.get("created_at") or UNKNOWN_TEXT,
-                "动作": "创建" if log.get("action") == "create" else status_label(log.get("action")),
+                "动作": log_action_label(log.get("action")),
                 "操作人": log.get("operator") or UNKNOWN_TEXT,
-                "备注": log.get("remark") or UNKNOWN_TEXT,
+                "备注": _truncate_remark(log.get("remark")),
             }
             for log in logs
         ],

@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from tools import ledger_parser
+
 # 扩展名 → source_type 映射
 # 注意：meeting（会议纪要）语义上无法由扩展名判断，需由调用方显式指定
 EXTENSION_SOURCE_TYPES: dict[str, str] = {
@@ -123,16 +125,44 @@ def _parse_excel(path: Path) -> str:
         raise ImportError("解析表格需要 pandas，请执行：pip install pandas openpyxl") from exc
 
     # header=None：保留表头行，避免丢失信息；dtype=str：避免数字被改写
-    if path.suffix.lower() == ".csv":
-        frame = pd.read_csv(path, header=None, dtype=str)
-    else:
-        frame = pd.read_excel(path, header=None, dtype=str)
+    try:
+        if path.suffix.lower() == ".csv":
+            frame = pd.read_csv(path, header=None, dtype=str)
+        else:
+            frame = pd.read_excel(path, header=None, dtype=str)
+    except ImportError as exc:
+        # 依赖缺失（例如真 .xls 需要 xlrd），转成可操作的中文提示
+        raise ImportError(
+            f"解析 {path.suffix} 需要额外的表格引擎，请执行：pip install xlrd"
+        ) from exc
+    except ValueError as exc:
+        # 表结构异常（合并单元格损坏、工作表为空等）
+        raise ValueError(f"表格内容无法解析：{path.name}（{exc}）") from exc
+    except Exception as exc:
+        # 兜底：把第三方库原始报错（可能含英文与本机路径）换成中文提示，
+        # 避免把 pandas/openpyxl 的内部信息直接暴露到界面上。
+        raise ValueError(
+            f"表格解析失败：{path.name}。请确认文件未加密、未损坏，"
+            f"且为标准 Excel 格式（.xlsx 或 .csv）。"
+        ) from exc
 
     lines: list[str] = []
+    # 结构化台账：保留空单元格，否则该行之后每一列都会左移一位，
+    # 把「负责人」错当成「截止时间」。非台账表格维持原有「丢弃空单元格」行为。
+    keep_empty = ledger_parser.is_ledger_frame(frame)
+
     for _, row in frame.iterrows():
-        cells = [str(value).strip() for value in row.tolist() if str(value).strip() not in ("", "nan")]
-        if cells:
-            lines.append(" | ".join(cells))
+        values = [
+            "" if str(value).strip().lower() in ("", "nan") else str(value).strip()
+            for value in row.tolist()
+        ]
+        if keep_empty:
+            if any(values):
+                lines.append(" | ".join(values))
+        else:
+            cells = [value for value in values if value]
+            if cells:
+                lines.append(" | ".join(cells))
     return "\n".join(lines)
 
 

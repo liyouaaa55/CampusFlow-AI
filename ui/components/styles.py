@@ -43,15 +43,15 @@ RISK_COLORS: dict[str, str] = {
 
 # 风险等级 → 中文徽章文案
 RISK_LABELS: dict[str, str] = {
-    "green": "正常",
-    "yellow": "需确认",
+    "green": "低风险",
+    "yellow": "中风险",
     "red": "高风险",
 }
 
 # 风险等级 → 整行背景色（任务表格用，正常保持白色）
 RISK_ROW_BACKGROUNDS: dict[str, str] = {
-    "正常": SURFACE,
-    "需确认": "#FFFBEB",   # 浅黄
+    "低风险": SURFACE,
+    "中风险": "#FFFBEB",   # 浅黄
     "高风险": "#FEF2F2",   # 浅红
 }
 
@@ -145,25 +145,25 @@ h3 {{ font-size: 17px !important; }}
     border: 1px solid {BORDER};
     border-top: 3px solid {PRIMARY};
     border-radius: {CARD_RADIUS};
-    padding: 18px 20px;
+    padding: 26px 26px;
     box-shadow: {SHADOW};
     height: 100%;
 }}
 .cf-kpi-label {{
     color: {TEXT_SUB};
     font-size: 13px;
-    margin-bottom: 8px;
+    margin-bottom: 12px;
 }}
 .cf-kpi-value {{
     color: {TEXT_MAIN};
-    font-size: 34px;
+    font-size: 36px;
     font-weight: 700;
-    line-height: 1.1;
+    line-height: 1.15;
 }}
 .cf-kpi-desc {{
     color: {TEXT_MUTED};
     font-size: 12px;
-    margin-top: 8px;
+    margin-top: 14px;
 }}
 .cf-kpi-value-text {{
     font-size: 18px !important;
@@ -177,14 +177,14 @@ h3 {{ font-size: 17px !important; }}
     border: 1px solid #BFDBFE;
     border-left: 4px solid {PRIMARY};
     border-radius: {CARD_RADIUS};
-    padding: 18px 20px;
+    padding: 24px 26px;
     box-shadow: {SHADOW};
 }}
 .cf-banner-title {{
     color: #1E3A8A;
     font-size: 15px;
     font-weight: 700;
-    margin-bottom: 8px;
+    margin-bottom: 12px;
 }}
 .cf-banner-text {{
     color: #334155;
@@ -245,13 +245,57 @@ h3 {{ font-size: 17px !important; }}
 }}
 
 /* ---------- 区块标题 ---------- */
+
+/* ---------- AI 主动发现：状态标签与事项行 ---------- */
+/* 小型圆角标签：浅底 + 深字，克制，不做成大色块 */
+.cf-tag {{
+    display: inline-block;
+    padding: 2px 8px;
+    font-size: 12px;
+    line-height: 18px;
+    border-radius: 4px;
+    font-weight: 500;
+    white-space: nowrap;
+}}
+.cf-tag--danger {{ background: #FEF2F2; color: {DANGER}; }}
+.cf-tag--warning {{ background: #FFFBEB; color: #B45309; }}
+.cf-tag--info {{ background: #EFF6FF; color: {PRIMARY}; }}
+.cf-tag--muted {{ background: #F1F5F9; color: {TEXT_SUB}; }}
+
+.cf-find {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-left: 3px solid {PRIMARY};
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+}}
+.cf-find-head {{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}}
+.cf-find-title {{
+    color: {TEXT_MAIN};
+    font-size: 15px;
+    font-weight: 600;
+}}
+.cf-find-row {{
+    font-size: 13px;
+    line-height: 1.8;
+    color: {TEXT_SUB};
+}}
+.cf-find-key {{ color: {TEXT_MUTED}; margin-right: 8px; }}
+.cf-find-val {{ color: {TEXT_MAIN}; }}
+.cf-find-advice {{ color: {PRIMARY}; }}
 .cf-section {{
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
     border-left: 4px solid {PRIMARY};
-    padding-left: 12px;
-    margin: 4px 0 14px 0;
+    padding-left: 14px;
+    margin: 30px 0 20px 0;
 }}
 .cf-section-title {{
     color: {TEXT_MAIN};
@@ -626,3 +670,43 @@ def risk_badge_html(risk: str | None) -> str:
     label = RISK_LABELS.get(key, "未评估")
     color = RISK_COLORS.get(key, TEXT_MUTED)
     return badge_html(label, color)
+
+
+# 状态条样式标记：随 st.status 一起注入，使执行进度条与页面主题一致。
+# 仅调整底色与边框，不隐藏任何文字或动画，保证用户能看到解析进度。
+STATUS_MARKER: str = (
+    "<style>"
+    '[data-testid="stStatusWidget"] {'
+    "background: transparent; border: none; box-shadow: none;"
+    "}"
+    '[data-testid="stExpander"] details {'
+    "background: transparent;"
+    "}"
+    "</style>"
+)
+
+# 状态标签的语义配色（沿用既有语义色，不新建色系）
+TAG_TONES: dict[str, str] = {
+    "danger": "danger",
+    "warning": "warning",
+    "info": "info",
+    "muted": "muted",
+}
+
+
+def tag_html(text: str, tone: str = "muted") -> str:
+    """小型状态标签：浅色背景 + 深色文字，克制，不做成大色块。"""
+    return f'<span class="cf-tag cf-tag--{TAG_TONES.get(tone, "muted")}">{text}</span>'
+
+
+def finding_html(tag_html_: str, title: str, situation: str, advice: str) -> str:
+    """AI 主动发现的事项行：状态标签 + 标题 / 当前情况 / AI 建议。"""
+    return (
+        f'<div class="cf-find">'
+        f'<div class="cf-find-head">{tag_html_}<span class="cf-find-title">{title}</span></div>'
+        f'<div class="cf-find-row"><span class="cf-find-key">当前情况</span>'
+        f'<span class="cf-find-val">{situation}</span></div>'
+        f'<div class="cf-find-row"><span class="cf-find-key">处理建议</span>'
+        f'<span class="cf-find-advice">{advice}</span></div>'
+        f"</div>"
+    )

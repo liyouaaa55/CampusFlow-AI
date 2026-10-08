@@ -1,5 +1,5 @@
 {
-  "_comment": "提醒级别定义（供第四阶段 ReminderAgent 使用）。天数阈值统一由 config/settings.py 提供（REMINDER_URGENT_DAYS / REMINDER_DUE_SOON_DAYS / REMINDER_NORMAL_DAYS），本文件只定义级别的名称、颜色与语义，避免阈值两处维护。",
+  "_comment": "提醒级别定义（供第四阶段 ReminderAgent 使用）。级别键名是程序内部英文枚举，label 是面向用户的中文展示名，二者不可混用；label 会被报告、界面与提醒文案直接引用，是本项目提醒等级的唯一权威来源。天数阈值统一由 config/settings.py 提供（REMINDER_URGENT_DAYS / REMINDER_DUE_SOON_DAYS / REMINDER_NORMAL_DAYS），本文件只定义级别的名称、颜色与语义。",
   "levels": {
     "normal": {
       "label": "正常",
@@ -7,12 +7,12 @@
       "description": "剩余天数大于临期阈值"
     },
     "due_soon": {
-      "label": "临期",
+      "label": "即将到期",
       "color": "yellow",
       "description": "剩余天数不超过 due_soon_days（默认 3 天）"
     },
     "urgent": {
-      "label": "紧急",
+      "label": "临期",
       "color": "orange",
       "description": "剩余天数不超过 urgent_days（默认 1 天）"
     },

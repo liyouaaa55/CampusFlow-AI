@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -109,7 +109,106 @@ def test_models_constants_mirror_settings() -> None:
     assert models.TASK_STATUSES == settings.TASK_STATUSES
     assert models.PRIORITIES == settings.PRIORITIES
     assert models.DEFAULT_STATUS == settings.DEFAULT_STATUS
-    assert models.LOG_ACTIONS == (models.ACTION_CREATE,) + settings.TASK_STATUSES
+    assert models.LOG_ACTIONS == (
+        (models.ACTION_CREATE,) + settings.TASK_STATUSES + models.EVENT_ACTIONS
+    )
+
+
+# ============================================================
+# 一之二、v2.0 事务事件契约（LOG_ACTIONS）
+# ============================================================
+
+
+def test_log_actions_contains_all_event_actions() -> None:
+    """LOG_ACTIONS 必须覆盖全部 6 个事务事件动作。"""
+    for action in models.EVENT_ACTIONS:
+        assert action in models.LOG_ACTIONS
+
+
+def test_event_actions_exact_values() -> None:
+    """事务事件动作的取值固定，避免各处写字符串字面量。"""
+    assert models.EVENT_ACTIONS == (
+        "analyze",
+        "draft",
+        "request",
+        "confirm",
+        "reject",
+        "escalate",
+    )
+    assert models.ACTION_ANALYZE == "analyze"
+    assert models.ACTION_DRAFT == "draft"
+    assert models.ACTION_REQUEST == "request"
+    assert models.ACTION_CONFIRM == "confirm"
+    assert models.ACTION_REJECT == "reject"
+    assert models.ACTION_ESCALATE == "escalate"
+
+
+def test_log_actions_composition_order() -> None:
+    """LOG_ACTIONS 的构成顺序固定：create + 状态值 + 事件值。"""
+    assert models.LOG_ACTIONS_STATUS == (models.ACTION_CREATE,) + settings.TASK_STATUSES
+    assert models.LOG_ACTIONS == models.LOG_ACTIONS_STATUS + models.EVENT_ACTIONS
+
+
+def test_event_actions_not_in_task_statuses() -> None:
+    """事务事件动作绝不能混入 TASK_STATUSES——状态与事件是两个独立维度。"""
+    for action in models.EVENT_ACTIONS:
+        assert action not in models.TASK_STATUSES
+        assert action not in settings.TASK_STATUSES
+
+
+def test_task_statuses_unchanged_by_v2() -> None:
+    """v2.0 不得改动任务状态枚举：仍恰好 6 种，语义不变。"""
+    assert settings.TASK_STATUSES == (
+        "pending",
+        "confirmed",
+        "processing",
+        "urgent",
+        "completed",
+        "overdue",
+    )
+
+
+def test_risk_levels_unchanged_by_v2() -> None:
+    """风险等级仍是 green / yellow / red 三级，与状态枚举相互独立。"""
+    assert models.RISK_LEVELS == ("green", "yellow", "red")
+    assert set(models.RISK_LEVELS).isdisjoint(set(models.TASK_STATUSES))
+
+
+def test_log_actions_has_no_duplicates() -> None:
+    """LOG_ACTIONS 不得出现重复项（事件值与状态值必须彼此不重叠）。"""
+    assert len(set(models.LOG_ACTIONS)) == len(models.LOG_ACTIONS)
+
+
+def test_event_actions_persistable_without_migration(db: Path) -> None:
+    """事务事件动作可直接落库——这正是「不需要数据库迁移」的实证。
+
+    task_logs.action 为无 CHECK 约束的 TEXT 列，因此新增事件动作只是
+    Python 层契约变更，既有表结构原样可用。
+    """
+    created = sqlite_db.create_task(sample_task(), db_path=db)
+
+    with sqlite_db.get_connection(db) as connection:
+        for action in models.EVENT_ACTIONS:
+            sqlite_db._insert_log(
+                connection,
+                task_id=created["id"],
+                action=action,
+                operator="张老师",
+                remark=f"事件 {action}",
+            )
+
+    actions = [log["action"] for log in sqlite_db.get_logs(created["id"], db_path=db)]
+    assert actions == [models.ACTION_CREATE, *models.EVENT_ACTIONS]
+
+
+def test_task_logs_action_column_has_no_check_constraint(db: Path) -> None:
+    """DDL 层确认：action 列无 CHECK 约束，事件动作因此无需迁移即可写入。"""
+    with sqlite_db.get_connection(db) as connection:
+        ddl = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (models.TABLE_TASK_LOGS,),
+        ).fetchone()["sql"]
+    assert "CHECK" not in ddl.upper()
 
 
 # ============================================================
@@ -232,7 +331,12 @@ def test_create_task_writes_create_log(db: Path) -> None:
 
 
 def test_create_task_accepts_planner_output(db: Path) -> None:
-    """PlannerAgent 的输出可以直接入库，规划字段完整保留。"""
+    """PlannerAgent 的输出可以直接入库，规划字段完整保留。
+
+    必须传入固定的基准日 TODAY：任务截止日为 2026-09-30，若使用 date.today()
+    作为基准日，该日期一旦过去就会被判定为「已逾期」，risk_level 随之
+    从 yellow 变为 red，本断言会随系统日期漂移而失效。
+    """
     planned = planner_agent.plan(
         [
             {
@@ -244,9 +348,11 @@ def test_create_task_accepts_planner_output(db: Path) -> None:
                 "status": "pending",
                 "description": "制定活动方案",
             }
-        ]
+        ],
+        today=date.fromisoformat(TODAY),
     )[0]
     assert planned["need_confirm"] is True  # 负责人与优先级缺失
+    assert planned["risk_level"] == "yellow"  # 截止日尚未到达，仅因负责人缺失
 
     created = sqlite_db.create_task(planned, db_path=db)
     assert created["priority"] == "medium"          # 由规则推断
@@ -480,6 +586,296 @@ def test_update_status_only_affects_target(db: Path) -> None:
 
     assert sqlite_db.get_task(second["id"], db_path=db)["status"] == "pending"
     assert len(sqlite_db.get_logs(second["id"], db_path=db)) == 1
+
+
+# ============================================================
+# 六之二、并发安全基础（v2.0 P0-0）
+# ============================================================
+
+
+def test_connection_timeout_is_ten_seconds() -> None:
+    """写锁等待时间固定为 10 秒，避免并发写直接报 database is locked。"""
+    assert sqlite_db.CONNECTION_TIMEOUT == 10.0
+
+
+def test_busy_timeout_pragma_applied(db: Path) -> None:
+    """timeout 参数等价于 PRAGMA busy_timeout，应实际作用到连接上。"""
+    with sqlite_db.get_connection(db) as connection:
+        busy = connection.execute("PRAGMA busy_timeout").fetchone()[0]
+    assert busy == 10_000  # SQLite 以毫秒为单位
+
+
+def test_wal_mode_enabled(db: Path) -> None:
+    """WAL 模式已启用：读写不互斥，降低并发写失败率。"""
+    with sqlite_db.get_connection(db) as connection:
+        mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+    assert str(mode).lower() == "wal"
+
+
+def test_wal_mode_survives_reconnect(db: Path) -> None:
+    """WAL 是数据库级属性，重新连接后依然生效。"""
+    sqlite_db.create_task(sample_task(), db_path=db)
+    with sqlite_db.get_connection(db) as connection:
+        mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+    assert str(mode).lower() == "wal"
+
+
+def test_db_path_and_tables_unchanged_by_concurrency_work(db: Path) -> None:
+    """并发加固不得改变数据库位置与表结构。"""
+    assert db.parent.name  # 仍是调用方指定的 tmp_path
+    assert set(["tasks", "task_logs"]).issubset(set(sqlite_objects(db, "table")))
+    assert table_columns(db, models.TABLE_TASKS) == list(models.TASK_ALL_COLUMNS)
+    assert table_columns(db, models.TABLE_TASK_LOGS) == list(models.TASK_LOG_COLUMNS)
+
+
+def test_update_status_rejects_stale_write(monkeypatch: pytest.MonkeyPatch, db: Path) -> None:
+    """乐观锁：读取之后状态被其他连接改掉，本次写入必须被拒绝。"""
+    created = sqlite_db.create_task(sample_task(), db_path=db)
+
+    real_fetch = sqlite_db._fetch_task
+    state = {"raced": False}
+
+    def fetch_then_race(connection: object, task_id: object) -> object:
+        """第一次读取返回真实行；随后用独立连接模拟「另一个用户抢先改掉了状态」。
+
+        必须使用独立连接并让其提交：若在同一连接内模拟，本次事务回滚时
+        会连带撤销那次竞争写入，就无法验证「他人修改被保留」这一真实场景。
+        """
+        row = real_fetch(connection, task_id)
+        if row is not None and not state["raced"]:
+            state["raced"] = True
+            with sqlite_db.get_connection(db) as other:
+                other.execute(
+                    "UPDATE tasks SET status = 'processing' WHERE id = ?", (int(task_id),)
+                )
+        return row
+
+    monkeypatch.setattr(sqlite_db, "_fetch_task", fetch_then_race)
+
+    with pytest.raises(sqlite_db.ConcurrentUpdateError):
+        sqlite_db.update_status(created["id"], "completed", db_path=db)
+
+    # 拒绝之后不得留下任何日志，且他人的修改必须被保留（不被静默覆盖）
+    assert [log["action"] for log in sqlite_db.get_logs(created["id"], db_path=db)] == [
+        models.ACTION_CREATE
+    ]
+    assert sqlite_db.get_task(created["id"], db_path=db)["status"] == "processing"
+
+
+# ============================================================
+# 六之三、更新风险等级 update_risk_level（v2.0 P0-2）
+# ============================================================
+
+
+def test_update_risk_level_returns_updated_record(db: Path) -> None:
+    """风险等级更新后返回带 id 的完整记录。"""
+    created = sqlite_db.create_task(sample_task(risk_level="green"), db_path=db)
+    updated = sqlite_db.update_risk_level(created["id"], "red", db_path=db)
+
+    assert updated["risk_level"] == "red"
+    assert updated["id"] == created["id"]
+    assert sqlite_db.get_task(created["id"], db_path=db)["risk_level"] == "red"
+
+
+@pytest.mark.parametrize("level", ["green", "yellow", "red"])
+def test_update_risk_level_accepts_all_allowed_levels(db: Path, level: str) -> None:
+    """三种合法风险等级均可写入。"""
+    created = sqlite_db.create_task(sample_task(risk_level="green"), db_path=db)
+    updated = sqlite_db.update_risk_level(created["id"], level, db_path=db)
+    assert updated["risk_level"] == level
+
+
+@pytest.mark.parametrize(
+    "bad_level",
+    ["urgent", "overdue", "高风险", "", "RED", None],
+)
+def test_update_risk_level_rejects_invalid_level(db: Path, bad_level: object) -> None:
+    """非法风险等级被拒绝，且不产生任何日志。
+
+    特别注意 urgent / overdue：它们是「由 deadline 推导的提醒级别」，
+    不是风险等级，必须被挡在门外。
+    """
+    created = sqlite_db.create_task(sample_task(), db_path=db)
+    with pytest.raises(ValueError):
+        sqlite_db.update_risk_level(created["id"], bad_level, db_path=db)  # type: ignore[arg-type]
+    assert len(sqlite_db.get_logs(created["id"], db_path=db)) == 1
+
+
+def test_update_risk_level_missing_task_raises(db: Path) -> None:
+    """任务不存在时报错，不静默失败。"""
+    with pytest.raises(sqlite_db.TaskNotFoundError):
+        sqlite_db.update_risk_level(999, "red", db_path=db)
+
+
+def test_update_risk_level_refreshes_updated_at_keeps_created_at(db: Path) -> None:
+    """更新风险等级只刷新 updated_at，不动 created_at。"""
+    created = sqlite_db.create_task(sample_task(), db_path=db)
+    updated = sqlite_db.update_risk_level(created["id"], "red", db_path=db)
+
+    assert updated["created_at"] == created["created_at"]
+    assert updated["updated_at"] >= created["updated_at"]
+
+
+def test_update_risk_level_writes_escalate_log(db: Path) -> None:
+    """按 v2.0 事件契约，本函数写入的日志 action 固定为 escalate。"""
+    created = sqlite_db.create_task(sample_task(risk_level="green"), db_path=db)
+    sqlite_db.update_risk_level(
+        created["id"], "red", operator="张老师", remark="逾期 2 天未推进", db_path=db
+    )
+
+    logs = sqlite_db.get_logs(created["id"], db_path=db)
+    assert len(logs) == 2
+    latest = logs[-1]
+    assert latest["action"] == models.ACTION_ESCALATE == "escalate"
+    assert latest["operator"] == "张老师"
+    assert latest["remark"] == "逾期 2 天未推进"
+    assert datetime.fromisoformat(latest["created_at"])
+
+
+def test_update_risk_level_default_operator_is_ai(db: Path) -> None:
+    """默认操作人为 AI，与既有写接口保持一致。"""
+    created = sqlite_db.create_task(sample_task(), db_path=db)
+    sqlite_db.update_risk_level(created["id"], "red", db_path=db)
+    assert sqlite_db.get_logs(created["id"], db_path=db)[-1]["operator"] == "AI"
+
+
+def test_update_risk_level_only_touches_risk_level(db: Path) -> None:
+    """严格边界：除 risk_level 外，任何字段都不得被修改。
+
+    这是「提级督办不得顺手改掉负责人 / 截止时间 / 状态」的强制保障。
+    """
+    original = sqlite_db.create_task(
+        sample_task(
+            title="宿舍消防隐患排查",
+            owner="王老师",
+            department="保卫处",
+            deadline="2026-09-30",
+            status="processing",
+            priority="high",
+            description="建立整改台账",
+            risk_level="yellow",
+        ),
+        db_path=db,
+    )
+    sqlite_db.update_risk_level(original["id"], "red", db_path=db)
+    latest = sqlite_db.get_task(original["id"], db_path=db)
+
+    assert latest["risk_level"] == "red"
+    for protected in (
+        "title",
+        "owner",
+        "department",
+        "deadline",
+        "status",
+        "priority",
+        "description",
+        "need_confirm",
+        "created_at",
+    ):
+        assert latest[protected] == original[protected], f"{protected} 不应被修改"
+
+
+def test_update_risk_level_does_not_change_status_to_urgent(db: Path) -> None:
+    """提级只改 risk_level，绝不把 status 改成 urgent / overdue。"""
+    created = sqlite_db.create_task(sample_task(risk_level="green"), db_path=db)
+    sqlite_db.update_risk_level(created["id"], "red", db_path=db)
+    assert sqlite_db.get_task(created["id"], db_path=db)["status"] == "pending"
+
+
+def test_update_risk_level_from_none_previous_value(db: Path) -> None:
+    """risk_level 原本为 NULL（未经 PlannerAgent）时也能正常提级。"""
+    created = sqlite_db.create_task({"title": "整理档案"}, db_path=db)
+    assert created["risk_level"] is None
+
+    updated = sqlite_db.update_risk_level(created["id"], "red", db_path=db)
+    assert updated["risk_level"] == "red"
+    assert len(sqlite_db.get_logs(created["id"], db_path=db)) == 2
+
+
+def test_update_risk_level_rejects_stale_write(
+    monkeypatch: pytest.MonkeyPatch, db: Path
+) -> None:
+    """乐观锁：读取之后风险等级被其他操作改掉，本次提级必须被拒绝。"""
+    created = sqlite_db.create_task(sample_task(risk_level="green"), db_path=db)
+
+    real_fetch = sqlite_db._fetch_task
+    state = {"raced": False}
+
+    def fetch_then_race(connection: object, task_id: object) -> object:
+        """第一次读取返回真实行；随后用独立连接模拟「另一个操作抢先改掉了 risk_level」。
+
+        使用独立连接并让其提交，才能真实还原并发场景：本次事务回滚时
+        他人的修改必须仍然存在。
+        """
+        row = real_fetch(connection, task_id)
+        if row is not None and not state["raced"]:
+            state["raced"] = True
+            with sqlite_db.get_connection(db) as other:
+                other.execute(
+                    "UPDATE tasks SET risk_level = 'yellow' WHERE id = ?", (int(task_id),)
+                )
+        return row
+
+    monkeypatch.setattr(sqlite_db, "_fetch_task", fetch_then_race)
+
+    with pytest.raises(sqlite_db.ConcurrentUpdateError):
+        sqlite_db.update_risk_level(created["id"], "red", db_path=db)
+
+    # 拒绝之后不得留下 escalate 日志，且他人的修改必须被保留
+    assert [log["action"] for log in sqlite_db.get_logs(created["id"], db_path=db)] == [
+        models.ACTION_CREATE
+    ]
+    assert sqlite_db.get_task(created["id"], db_path=db)["risk_level"] == "yellow"
+
+
+def test_update_risk_level_rolls_back_when_log_write_fails(
+    monkeypatch: pytest.MonkeyPatch, db: Path
+) -> None:
+    """事务一致性：日志写入失败时，风险等级改动必须一并回滚。"""
+    created = sqlite_db.create_task(sample_task(risk_level="green"), db_path=db)
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise sqlite_db.DatabaseError("模拟日志写入失败")
+
+    monkeypatch.setattr(sqlite_db, "_insert_log", boom)
+
+    with pytest.raises(sqlite_db.DatabaseError):
+        sqlite_db.update_risk_level(created["id"], "red", db_path=db)
+
+    assert sqlite_db.get_task(created["id"], db_path=db)["risk_level"] == "green"
+    assert [log["action"] for log in sqlite_db.get_logs(created["id"], db_path=db)] == [
+        models.ACTION_CREATE
+    ]
+
+
+def test_update_status_rolls_back_when_log_write_fails(
+    monkeypatch: pytest.MonkeyPatch, db: Path
+) -> None:
+    """事务一致性：状态修改同样保证「改数据 + 写日志」原子性。"""
+    created = sqlite_db.create_task(sample_task(), db_path=db)
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise sqlite_db.DatabaseError("模拟日志写入失败")
+
+    monkeypatch.setattr(sqlite_db, "_insert_log", boom)
+
+    with pytest.raises(sqlite_db.DatabaseError):
+        sqlite_db.update_status(created["id"], "completed", db_path=db)
+
+    assert sqlite_db.get_task(created["id"], db_path=db)["status"] == "pending"
+    assert len(sqlite_db.get_logs(created["id"], db_path=db)) == 1
+
+
+def test_update_risk_level_repeatedly_creates_escalate_chain(db: Path) -> None:
+    """多次提级按序留痕，为后续 analyze/confirm/escalate 事件链打下基础。"""
+    created = sqlite_db.create_task(sample_task(risk_level="green"), db_path=db)
+    sqlite_db.update_risk_level(created["id"], "red", operator="张老师", db_path=db)
+    sqlite_db.update_risk_level(created["id"], "yellow", operator="李老师", db_path=db)
+
+    actions = [log["action"] for log in sqlite_db.get_logs(created["id"], db_path=db)]
+    assert actions == [models.ACTION_CREATE, "escalate", "escalate"]
+    # 每次调用都重新读取，因此连续两次都是合法写入而非并发冲突
+    assert sqlite_db.get_task(created["id"], db_path=db)["risk_level"] == "yellow"
 
 
 # ============================================================

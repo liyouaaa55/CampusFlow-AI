@@ -543,14 +543,14 @@ def test_load_level_rules_from_knowledge_file() -> None:
     """真实规则文件包含四个级别的 label / color。"""
     rules = reminder_agent.load_level_rules()
     assert set(reminder_agent.REMINDER_LEVELS).issubset(set(rules))
-    assert rules["urgent"]["label"] == "紧急"
+    assert rules["urgent"]["label"] == "临期"
     assert rules["overdue"]["color"] == "red"
     assert all(rules[level]["label"] for level in reminder_agent.REMINDER_LEVELS)
 
 
 def test_level_label_and_color() -> None:
     """展示用的中文名与颜色来自规则文件。"""
-    assert reminder_agent.level_label("due_soon") == "临期"
+    assert reminder_agent.level_label("due_soon") == "即将到期"
     assert reminder_agent.level_color("urgent") == "orange"
 
 
@@ -656,7 +656,7 @@ def test_render_reminders_markdown(mixed_db: Path) -> None:
     text = report_tool.render_reminders(items)
 
     assert "- **整理活动总结材料**（已逾期，逾期 3 天）" in text
-    assert "- **完成安全隐患排查**（紧急，剩余 0 天）" in text
+    assert "- **完成安全隐患排查**（临期，剩余 0 天）" in text
     assert text.count("- **") == len(items)
 
 

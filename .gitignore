@@ -33,5 +33,15 @@ data/
 Thumbs.db
 desktop.ini
 
-# ---------- AI ���߹����� ----------
 .workbuddy/
+
+# ---------- 开发过程运行时产物（v2.0 Final RC1）----------
+# 说明：以下均为本地调试/评测产物，不属于比赛交付内容。
+# 正式交付物（源码、测试代码、知识库模板、docs/dev 下的工具脚本）不受影响。
+docs/dev/_*.err
+docs/dev/_*.db
+docs/dev/_*.json
+docs/dev/_parsed/
+docs/dev/_results/
+docs/dev/_stability/
+docs/dev/_closed_loop.md

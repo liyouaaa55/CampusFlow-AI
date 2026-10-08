@@ -304,13 +304,13 @@ def test_weekly_report_section_count(weekly_db: Path) -> None:
 
 
 def test_weekly_report_overview_metrics(weekly_db: Path) -> None:
-    """总体概况包含总任务、完成率、临期、逾期。"""
+    """总体概况包含总任务、完成率及各提醒等级（中文名取自 reminder.json）。"""
     report = weekly_report(weekly_db)
     assert "| 总任务 | 6 |" in report
     assert "| 完成率 | 33.3% |" in report
-    assert "| 临期 | 2 |" in report
-    assert "| 逾期 | 1 |" in report
-    assert "| 紧急 | 1 |" in report
+    assert "| 即将到期 | 2 |" in report   # due_soon
+    assert "| 已逾期 | 1 |" in report     # overdue
+    assert "| 临期 | 1 |" in report       # urgent
 
 
 def test_weekly_report_department_table(weekly_db: Path) -> None:
@@ -359,11 +359,11 @@ def test_weekly_report_can_be_written_to_file(weekly_db: Path, tmp_path: Path) -
 
 
 def test_risk_messages_only_urgent_and_overdue(weekly_db: Path) -> None:
-    """风险事项仅包含紧急与逾期两类，不包含临期/正常任务。"""
+    """风险事项仅包含临期（urgent）与已逾期两类，不包含即将到期/正常任务。"""
     report = weekly_report(weekly_db)
     assert "【已逾期】宿舍消防隐患专项排查" in report
-    assert "【紧急】举办机器人创新周" in report
-    # 临期与已完成任务不出现在风险清单中
+    assert "【临期】举办机器人创新周" in report
+    # 即将到期与已完成任务不出现在风险清单中
     assert "清理临时堆放杂物" not in report
     assert "更新宣传栏" not in report
 
@@ -537,9 +537,9 @@ def test_department_report_task_table_labels(weekly_db: Path) -> None:
 
 
 def test_department_report_risk_only_department(weekly_db: Path) -> None:
-    """风险事项只列本部门的紧急 / 逾期任务。"""
+    """风险事项只列本部门的临期 / 已逾期任务。"""
     report = department_report(weekly_db, "学工办")
-    assert "【紧急】举办机器人创新周" in report
+    assert "【临期】举办机器人创新周" in report
     assert "宿舍消防隐患专项排查" not in report
 
 
@@ -612,7 +612,7 @@ def test_report_does_not_use_check_all(monkeypatch: pytest.MonkeyPatch, weekly_d
     monkeypatch.setattr(reminder_agent, "check_all", forbidden)
 
     report = weekly_report(weekly_db)
-    assert "| 逾期 | 1 |" in report
+    assert "| 已逾期 | 1 |" in report
     assert "【已逾期】宿舍消防隐患专项排查" in report
 
 

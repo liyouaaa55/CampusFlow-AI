@@ -67,7 +67,8 @@ def kpi_row(items: Sequence[Mapping[str, Any]], columns: int | None = None) -> N
     if column_count <= 0:
         return
 
-    for column, item in zip(st.columns(column_count), items):
+    # 列间距统一用 gap="medium"：Streamlit 默认列间距偏窄，KPI 并排时显得拥挤
+    for column, item in zip(st.columns(column_count, gap="medium"), items):
         with column:
             st.markdown(_kpi_html(item), unsafe_allow_html=True)
 

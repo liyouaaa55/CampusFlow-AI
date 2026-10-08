@@ -20,6 +20,7 @@
     id         INTEGER PRIMARY KEY AUTOINCREMENT
     task_id    INTEGER  关联 tasks.id
     action     TEXT     create / 变更后的状态值（如 completed）
+                      / 事务事件（analyze/draft/request/confirm/reject/escalate）
     operator   TEXT     操作人（AI 或人工姓名）
     remark     TEXT     备注
     created_at TEXT     操作时间
@@ -54,11 +55,42 @@ DEFAULT_OPERATOR: str = "AI"
 # 二、日志动作
 # ============================================================
 
+# --- 2.1 状态类动作 ---
+
 # 新建任务时的动作名
 ACTION_CREATE: str = "create"
 
-# 允许出现的日志动作 = 新建 + 全部状态值（状态变更时 action 即为新状态）
-LOG_ACTIONS: tuple[str, ...] = (ACTION_CREATE,) + TASK_STATUSES
+# 状态类日志动作 = 新建 + 全部状态值（状态变更时 action 即为新状态）
+LOG_ACTIONS_STATUS: tuple[str, ...] = (ACTION_CREATE,) + TASK_STATUSES
+
+
+# --- 2.2 事务事件动作（v2.0）---
+
+# 说明：任务状态（pending/confirmed/...）与风险等级（green/yellow/red）是两个
+# 不同概念。status 中的 urgent / overdue 恒由 deadline 推导，不得当作风险等级使用。
+# 下列动作用于记录「事务事件记忆」——处置链路上的分析、建议、确认与执行，
+# 它们既不是任务状态，也不是风险等级，因此独立成组、绝不并入 TASK_STATUSES。
+ACTION_ANALYZE: str = "analyze"    # 完成一次处置分析
+ACTION_DRAFT: str = "draft"        # 生成提醒 / 督办文案草稿
+ACTION_REQUEST: str = "request"    # 请求人工补充缺失信息
+ACTION_CONFIRM: str = "confirm"    # 人工确认处置方案
+ACTION_REJECT: str = "reject"      # 人工否决处置方案
+ACTION_ESCALATE: str = "escalate"  # 提级督办（risk_level 提升为 red）
+
+# 事务事件动作集合
+EVENT_ACTIONS: tuple[str, ...] = (
+    ACTION_ANALYZE,
+    ACTION_DRAFT,
+    ACTION_REQUEST,
+    ACTION_CONFIRM,
+    ACTION_REJECT,
+    ACTION_ESCALATE,
+)
+
+# 允许出现的全部日志动作 = 新建 + 全部状态值 + 全部事务事件
+# 说明：task_logs.action 为无 CHECK 约束的 TEXT 列（见 CREATE_TASK_LOGS_SQL），
+# 因此新增动作属于 Python 层契约变更，不需要数据库迁移。
+LOG_ACTIONS: tuple[str, ...] = LOG_ACTIONS_STATUS + EVENT_ACTIONS
 
 # ============================================================
 # 三、表名与字段顺序（字段顺序即 PRAGMA table_info 的顺序）

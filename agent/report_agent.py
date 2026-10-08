@@ -44,7 +44,7 @@ DEFAULT_SECTION_TITLES: dict[str, str] = {
     "overview": "一、总体概况",
     "departments": "二、部门统计",
     "tasks": "二、任务明细",
-    "risk": "三、风险事项（仅紧急与逾期）",
+    "risk": "三、风险事项（仅临期与已逾期）",
     "suggestions": "四、AI分析建议",
 }
 
@@ -65,11 +65,11 @@ MIN_SUGGESTIONS: int = 3
 MAX_SUGGESTIONS: int = 5
 
 # ---------- 建议文案（纯规则，禁止 LLM）----------
-MSG_OVERDUE: str = "建议优先处理逾期事项。"
+MSG_OVERDUE: str = "建议优先处理已逾期事项。"
 MSG_COORDINATION: str = "建议召开专项协调会。"
 MSG_SUPERVISE: str = "建议加强督办力度。"
-MSG_URGENT_FOLLOWUP: str = "建议及时跟进 {count} 项紧急事项。"
-MSG_DUE_SOON: str = "建议提前安排 {count} 项临期事项，避免转为逾期。"
+MSG_URGENT_FOLLOWUP: str = "建议及时跟进 {count} 项临期事项。"
+MSG_DUE_SOON: str = "建议提前安排 {count} 项即将到期事项，避免转为已逾期。"
 MSG_RATE_OK: str = "完成率 {rate} 已达目标，建议保持当前推进节奏。"
 MSG_RATE_PERFECT: str = "完成率 100%，建议总结本期经验并沉淀标准流程。"
 MSG_MISSING_OWNER: str = "建议为 {count} 项任务补充负责人。"
@@ -431,15 +431,19 @@ def _assemble_report(
 
 
 def _overview_metrics(stats: Mapping[str, Any]) -> dict[str, Any]:
-    """总体概况的指标表内容。"""
+    """总体概况的指标表内容。
+
+    提醒等级的中文名统一取自 knowledge/rules/reminder.json（经
+    reminder_agent.level_label() 读取），不在此处硬编码，避免与界面口径漂移。
+    """
     return {
         "总任务": int(stats.get("total") or 0),
         "已完成": int(stats.get("completed") or 0),
         "进行中": int(stats.get("processing") or 0),
         "完成率": report_tool.format_percent(stats.get("completion_rate") or 0.0),
-        "临期": int(stats.get("due_soon") or 0),
-        "紧急": int(stats.get("urgent") or 0),
-        "逾期": int(stats.get("overdue") or 0),
+        reminder_agent.level_label("due_soon"): int(stats.get("due_soon") or 0),
+        reminder_agent.level_label("urgent"): int(stats.get("urgent") or 0),
+        reminder_agent.level_label("overdue"): int(stats.get("overdue") or 0),
     }
 
 
