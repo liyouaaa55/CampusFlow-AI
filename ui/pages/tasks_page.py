@@ -24,6 +24,7 @@ from database import models, sqlite_db
 from tools import execution_tool
 from ui import labels
 from ui.components import cards, state, styles, tables
+from ui.pages import submission_view
 
 # 页面标题与副标题
 PAGE_TITLE: str = "任务督办中心"
@@ -448,10 +449,13 @@ def _render_actions(
         _render_status_form(task, task_id)
 
     st.write("")
+    submission_view.render_entry(task, task_id, scope="list")
+
+    st.write("")
     _render_execution_panel(task, task_id, scope="list")
 
     st.write("")
-    cards.section("操作日志", "状态变更与智能处置全程留痕")
+    cards.section("操作日志", "状态变更、下发与智能处置全程留痕")
     logs = sqlite_db.get_logs(task_id)
     if logs:
         st.dataframe(tables.logs_dataframe(logs), hide_index=True, use_container_width=True)

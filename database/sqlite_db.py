@@ -18,6 +18,7 @@
     update_status(task_id, status, operator, remark)  改状态（自动写同状态名日志）
     update_risk_level(task_id, risk_level, operator, remark)  改风险等级（自动写 escalate 日志）
     append_log(task_id, action, operator, remark)  追加一条日志（不改 tasks 表）
+    append_chain_log(task_id, action, ...)          追加执行链路日志（v2.1：dispatch/submit）
     delete_task(task_id)                       删除任务及其日志
     get_logs(task_id)                          查询某任务的全部操作历史
 
@@ -332,6 +333,62 @@ def append_log(
     异常：ValueError action 非法；TaskNotFoundError 任务不存在。
     """
     _validate_log_action(action)
+
+    with get_connection(db_path) as connection:
+        existing = _fetch_task(connection, task_id)
+        if existing is None:
+            raise TaskNotFoundError(f"任务不存在：id={task_id}")
+
+        _insert_log(
+            connection,
+            task_id=int(task_id),
+            action=action,
+            operator=operator,
+            remark=remark,
+        )
+        row = connection.execute(
+            f"SELECT {', '.join(models.TASK_LOG_COLUMNS)} FROM {models.TABLE_TASK_LOGS} "
+            "WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            (int(task_id),),
+        ).fetchone()
+
+    return dict(row)
+
+
+def append_chain_log(
+    task_id: int,
+    action: str,
+    operator: str = models.DEFAULT_OPERATOR,
+    remark: str = "",
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """追加一条 v2.1 执行链路日志（dispatch / submit）。
+
+    与 append_log 的区别（刻意保持两者并存，互不影响）：
+    - append_log 校验 models.LOG_ACTIONS，那是 v2.0 的事务事件契约，
+      改动它会破坏既有测试，因此**保持原样、一行未动**；
+    - 本函数校验 models.CHAIN_ACTIONS —— 一个只有 dispatch / submit 的
+      封闭清单，用于「任务下发」「工作回执」这类执行闭环事件。
+      同样写入 task_logs，复用既有日志表与外键、事务、WAL 等全部机制。
+
+    为什么不并入 EVENT_ACTIONS：
+      EVENT_ACTIONS 的取值与顺序被 test_database.py / test_execution_tool.py
+        逐值断言，一旦扩充会让这些既有测试失败。执行闭环事件与智能体处置事件
+        本就是两个维度，单列清单既满足扩展需求，又不破坏 2.0 契约。
+
+    边界：
+    1. **不修改 tasks 表任何字段**，连 updated_at 都不刷新——
+       「发生了一件事」不等于「任务数据变了」，与 append_log 保持同一口径；
+    2. action 必须是 CHAIN_ACTIONS 之一，封闭清单不接受任意外来字符串；
+    3. 任务不存在时抛 TaskNotFoundError，绝不留下孤儿子记录。
+
+    返回：刚写入的那条日志记录。
+    异常：ValueError action 非法；TaskNotFoundError 任务不存在。
+    """
+    if action not in models.CHAIN_ACTIONS:
+        raise ValueError(
+            f"action 非法：{action!r}（允许值：{'/'.join(models.CHAIN_ACTIONS)}）"
+        )
 
     with get_connection(db_path) as connection:
         existing = _fetch_task(connection, task_id)

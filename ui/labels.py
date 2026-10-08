@@ -83,7 +83,36 @@ LOG_ACTION_LABELS: dict[str, str] = {
     models.ACTION_CONFIRM: "人工确认",
     models.ACTION_REJECT: "人工否决",
     models.ACTION_ESCALATE: "提级督办",
+    # --- 执行链路类（v2.1）---
+    models.ACTION_DISPATCH: "系统内下发",
+    models.ACTION_SUBMIT: "提交工作回执",
 }
+
+
+# ============================================================
+# 四之二、负责人回执提交态（v2.1）
+# ============================================================
+#
+# 为什么单独成一张表，而不并入上面的 STATUS_LABELS：
+#   STATUS_LABELS 描述的是 **tasks.status**（任务自身状态），
+#   而这三个词描述的是 **task_submissions 的事实**（负责人交没交回执）。
+#   两者是两个独立维度：任务可以是「进行中」，同时回执是「待提交」。
+#   混进同一张表会让「状态」这个概念在界面上产生歧义，
+#   也会与 test_framework 锁定的 STATUS_LABELS 集合冲突。
+#
+# 英文键只存在于程序内部，界面上永不出现（沿用本模块「不泄漏英文」纪律）。
+SUBMISSION_LABELS: dict[str, str] = {
+    "pending_submit": "待提交",
+    "submitted": "已提交",
+    "overdue_unsubmitted": "已逾期未提交",
+}
+
+# 执行回执状态的展示顺序（与 SUBMISSION_LABELS 的键一一对应）
+SUBMISSION_ORDER: tuple[str, ...] = (
+    "pending_submit",
+    "submitted",
+    "overdue_unsubmitted",
+)
 
 
 # ============================================================
@@ -195,3 +224,16 @@ def log_action_label(action: Any) -> str:
     if not key:
         return UNKNOWN_TEXT
     return LOG_ACTION_LABELS.get(key, UNKNOWN_TEXT)
+
+
+def submission_label(state: Any) -> str:
+    """回执提交态 → 中文（待提交 / 已提交 / 已逾期未提交）。
+
+    与 status_label 分开：前者回答「任务本身处于什么状态」，
+    本函数回答「负责人交没交回执」。查不到映射时同样返回占位符，
+    绝不把 pending_submit 这类内部枚举泄漏到界面上。
+    """
+    key = str(state or "").strip()
+    if not key:
+        return UNKNOWN_TEXT
+    return SUBMISSION_LABELS.get(key, UNKNOWN_TEXT)

@@ -18,6 +18,8 @@ import pandas as pd
 import streamlit as st
 
 from agent import reminder_agent, report_agent
+from database import sqlite_db
+from tools import task_dispatch
 from ui import labels
 from ui.components import cards, styles
 
@@ -65,6 +67,9 @@ def render() -> None:
         _render_top_departments(dashboard)
 
     st.write("")
+    _render_submission_check()
+
+    st.write("")
     _render_report()
     cards.note("本报告基于演示数据自动生成，仅用于比赛展示。")
 
@@ -72,6 +77,69 @@ def render() -> None:
 # ------------------------------------------------------------
 # 内部实现
 # ------------------------------------------------------------
+
+
+def _render_submission_check() -> None:
+    """执行回执检查区块。
+
+    全部数字来自 SQLite 的确定性统计（tools.task_dispatch.summary），
+    **不调用大模型**：提交率是算出来的，不是模型说的。
+    """
+    cards.section("执行回执检查", "基于任务下发记录与负责人回执的真实数据统计")
+
+    try:
+        data = task_dispatch.summary()
+    except sqlite_db.DatabaseError:
+        st.error("执行回执数据读取失败，请稍后重试。")
+        return
+
+    if not data["total"]:
+        cards.empty_state("暂无任务数据", "请先在「事项智能识别」中确认任务后再查看执行检查。")
+        return
+
+    cards.kpi_row(
+        [
+            {"label": "任务总数", "value": str(data["total"]), "color": styles.PRIMARY},
+            {"label": "已下发", "value": str(data["dispatched"]), "color": styles.PRIMARY},
+            {
+                "label": labels.SUBMISSION_LABELS["submitted"],
+                "value": str(data["submitted"]),
+                "color": styles.SUCCESS,
+            },
+            {
+                "label": labels.SUBMISSION_LABELS["pending_submit"],
+                "value": str(data["pending"]),
+                "color": styles.WARNING,
+            },
+            {
+                "label": labels.SUBMISSION_LABELS["overdue_unsubmitted"],
+                "value": str(data["overdue"]),
+                "color": styles.DANGER,
+            },
+            {"label": "提交率", "value": f"{data['rate']}%", "color": styles.PRIMARY},
+        ]
+    )
+
+    st.write("")
+    rows = [
+        [
+            str(row["title"]) or labels.UNKNOWN_TEXT,
+            str(row["department"]) or labels.UNKNOWN_TEXT,
+            str(row["owner"]) or labels.UNKNOWN_TEXT,
+            str(row["deadline"]) or labels.UNKNOWN_TEXT,
+            labels.submission_label(row["state"]),
+            str(row["submitted_at"]) or labels.UNKNOWN_TEXT,
+        ]
+        for row in data["rows"]
+    ]
+    st.dataframe(
+        pd.DataFrame(
+            rows,
+            columns=["任务名称", "部门", "负责人", "截止时间", "回执状态", "提交时间"],
+        ),
+        hide_index=True,
+        use_container_width=True,
+    )
 
 
 def _leader_lines(dashboard: Mapping[str, Any], reminders: Sequence[Mapping[str, Any]]) -> list[str]:
