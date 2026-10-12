@@ -41,7 +41,14 @@ from typing import Any, Callable, Mapping, Sequence
 
 from agent import reminder_agent
 from config import settings
-from database import models, sqlite_db
+from database import (
+    closure_store,
+    models,
+    sqlite_db,
+    submission_store,
+    task_metadata_store,
+    verification_store,
+)
 from llm import client, prompts
 from tools import execution_tool
 
@@ -56,6 +63,10 @@ HISTORY_LIMIT: int = 20
 
 # 历史为空时的占位说明（避免 Prompt 里出现空的「历史事件」段落）。
 NO_HISTORY_TEXT: str = "（该任务暂无历史操作事件）"
+
+# 办结标准 / 办理进度为空时的占位说明（与历史占位同口径）。
+NO_CRITERIA_TEXT: str = "（该任务尚未设置办结标准与办理要求）"
+NO_SUBMISSION_TEXT: str = "（该任务尚未提交工作回执）"
 
 # 送入分析上下文的任务字段白名单。
 # 只暴露与「判断当前执行风险」直接相关的字段，不整体倾倒 task 记录。
@@ -110,8 +121,8 @@ def analyze(
         today    基准日期，默认今天；显式传入便于测试与复算。
 
     返回：
-        None            —— 无需处置（任务已完成 / 缺少截止时间 / 提醒等级正常）。
-                           这三种情况**不会调用大模型**。
+        None            —— 无需处置（任务已正式闭环 / 已完成 / 缺少截止时间 /
+                           提醒等级正常）。这些情况**不会调用大模型**。
         dict            —— 处置结果，固定包含以下键：
                            ok         是否得到可执行的处置计划
                            task_id    任务主键
@@ -138,6 +149,13 @@ def analyze(
         # 沿用项目既有异常体系，不吞异常、不返回空结果
         raise sqlite_db.TaskNotFoundError(f"任务不存在：id={task_id}")
 
+    # ---------- STEP 1.5 正式闭环早退（不调用大模型、不写日志） ----------
+    # 已正式闭环的任务不再接受督办分析。判定依据是 task_closures 表是否存在记录
+    # （与 tools/task_dispatch.dispatch_task 完全同一口径）。
+    # **绝不**用 tasks.status == "completed" 代替：闭环不回写 status，二者互不蕴含。
+    if closure_store.is_closed(int(task_id), db_path=db_path):
+        return None
+
     # ---------- STEP 2 早退判断（不调用大模型） ----------
     # 复用 ReminderAgent：已完成、缺截止时间、等级正常三种情况都在这里返回 None。
     reminder = reminder_agent.check_task(task_id, today=base_date, db_path=db_path)
@@ -154,7 +172,11 @@ def analyze(
     # ---------- STEP 3 读取历史 ----------
     logs = sqlite_db.get_logs(task_id, db_path=db_path)
 
-    # ---------- STEP 4 由规则确定动作（与 LLM 无关） ----------
+    # ---------- STEP 3.5 读取办结标准与办理进度（只读，供模型参考） ----------
+    # 这两项是 v2.2 已落地的既定业务事实：分析若不感知，
+    # 会在「已提交回执 / 核验未通过 / 已设办结标准」时给出错误结论。
+    criteria_block = _render_criteria_context(task_id, db_path)
+    progress_block = _render_progress_context(task_id, db_path)
     action = execution_tool.select_action(level, task, logs)
     if action is None:
         return None
@@ -166,6 +188,8 @@ def analyze(
         level=level,
         days_left=days_text,
         task_block=_render_task_context(task),
+        criteria_block=criteria_block,
+        progress_block=progress_block,
         history_block=_render_history(logs),
     )
     caller = llm_fn or client.chat_json
@@ -331,3 +355,270 @@ def _render_history(logs: Sequence[Mapping[str, Any]]) -> str:
         {field: entry.get(field) for field in HISTORY_CONTEXT_FIELDS} for entry in recent
     ]
     return json.dumps(rendered, ensure_ascii=False, indent=2)
+
+
+def _render_criteria_context(task_id: int, db_path: str | Path | None) -> str:
+    """渲染办结标准与办理要求（只读）。
+
+    数据来自 task_metadata_store（v2.2 人工确认的办结标准）；
+    未设置时返回显式占位，不臆造标准。
+    """
+    meta = task_metadata_store.get_metadata(int(task_id), db_path=db_path)
+    payload = {
+        "execution_requirements": list(meta.get("execution_requirements") or []),
+        "closure_criteria": list(meta.get("closure_criteria") or []),
+        "closure_confirmed": bool(meta.get("closure_confirmed")),
+    }
+    if not payload["execution_requirements"] and not payload["closure_criteria"]:
+        return NO_CRITERIA_TEXT
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _render_progress_context(task_id: int, db_path: str | Path | None) -> str:
+    """渲染办理进度：工作回执摘要 + 最近一次核验结果（只读）。
+
+    只暴露结论性字段（是否已提交、核验状态与原因），
+    不倾倒回执全文；缺失时显式说明，不臆造「已提交 / 已核验」。
+    """
+    submission = submission_store.get_submission(int(task_id), db_path=db_path)
+    if submission is None:
+        return NO_SUBMISSION_TEXT
+
+    latest = verification_store.latest_verification(int(task_id), db_path=db_path)
+    payload = {
+        "submitted": True,
+        "submitted_at": submission.get("submitted_at"),
+        "submission_excerpt": (str(submission.get("content") or "")[:200]),
+        "latest_verification_status": (latest or {}).get("status"),
+        "latest_verification_reason": (latest or {}).get("reason"),
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+# ============================================================
+# 四、v3.0 第一阶段：下发前检查分析（与提醒等级无关）
+# ============================================================
+#
+# 为什么需要独立入口：
+#   analyze() 是「执行期处置分析」，受提醒等级驱动——未临期/未逾期直接返回 None。
+#   而管理者在下发之前需要的是「任务清不清楚、能不能下发、还缺什么」，
+#   这与是否临期无关。把两者混用，正常进度的新任务必然被判成「无需处置」，
+#   这正是旧版「智能分析经常显示没有必要分析」的根因。
+
+# 关键执行信息的中文名（规则层与 Prompt 共用）
+MISSING_FIELD_LABELS: dict[str, str] = {
+    "title": "任务标题",
+    "department": "责任部门",
+    "owner": "负责人",
+    "deadline": "截止时间",
+    "description": "执行要求",
+}
+
+# 下发前结论
+READINESS_READY: str = "ready"
+READINESS_NEEDS_SUPPLEMENT: str = "needs_supplement"
+READINESS_RISKY: str = "risky"
+READINESS_CLOSED: str = "closed"
+READINESS_LEVELS: tuple[str, ...] = (
+    READINESS_READY,
+    READINESS_NEEDS_SUPPLEMENT,
+    READINESS_RISKY,
+)
+
+# 问题严重度与归属字段（封闭集合，模型给非法值一律回落）
+ISSUE_SEVERITIES: tuple[str, ...] = ("high", "medium", "low")
+ISSUE_FIELDS: tuple[str, ...] = (*MISSING_FIELD_LABELS, "none")
+
+# 缺失这些字段时视为「暂不具备下发条件」（与 task_dispatch 的硬门槛口径一致：
+# 负责人是硬门槛；标题与截止时间缺失同样必须先补充）
+BLOCKING_FIELDS: tuple[str, ...] = ("title", "owner", "deadline")
+
+
+def detect_missing_fields(task: Mapping[str, Any]) -> list[str]:
+    """规则层：列出关键执行信息中缺失的字段。
+
+    确定性判断，不依赖模型；顺序固定，便于界面稳定展示。
+    """
+    missing: list[str] = []
+    for field in ("title", "department", "owner", "deadline", "description"):
+        value = task.get(field)
+        if value is None or not str(value).strip():
+            missing.append(field)
+    return missing
+
+
+def analyze_before_dispatch(
+    task_id: int,
+    llm_fn: LlmFn | None = None,
+    db_path: str | Path | None = None,
+    today: date | None = None,
+) -> dict[str, Any]:
+    """下发前检查分析：判断任务是否清楚、能否下发、还缺什么。
+
+    与 analyze() 的差别（设计要点）：
+    - **与提醒等级无关**：不会因为「未临期 / 未逾期」而跳过分析；
+    - **必定调用大模型**（任务不存在或已闭环除外）；
+    - **失败与「无需处理」严格区分**：模型失败或结构非法一律抛
+      ExecutionAnalysisError，由调用方展示为「分析未成功」，
+      绝不返回 None 被界面误读成「没有必要分析」。
+
+    返回（成功）：
+        ok / kind("analysis") / executed(True) / task_id / readiness /
+        summary / issues / missing_fields / blocking / model_used /
+        level / days_left / error("")
+
+    已闭环：返回 kind="closed"、executed=False（不调用模型）。
+    异常：sqlite_db.TaskNotFoundError 任务不存在；
+         ExecutionAnalysisError 模型调用失败或返回结构不合法。
+    """
+    base_date = today or date.today()
+    task = sqlite_db.get_task(task_id, db_path=db_path)
+    if task is None:
+        raise sqlite_db.TaskNotFoundError(f"任务不存在：id={task_id}")
+
+    if closure_store.is_closed(int(task_id), db_path=db_path):
+        return {
+            "ok": False,
+            "kind": "closed",
+            "executed": False,
+            "task_id": int(task_id),
+            "readiness": READINESS_CLOSED,
+            "summary": "该任务已正式闭环，无需再做下发前分析。",
+            "issues": [],
+            "missing_fields": [],
+            "blocking": False,
+            "model_used": False,
+            "level": "",
+            "days_left": None,
+            "error": "",
+        }
+
+    logs = sqlite_db.get_logs(task_id, db_path=db_path)
+    missing_fields = detect_missing_fields(task)
+    level, days_left = _predispatch_level(task, base_date)
+
+    user_prompt = prompts.PREDISPATCH_ANALYSIS_USER.format(
+        today=base_date.isoformat(),
+        task_block=_render_task_context(task),
+        criteria_block=_render_criteria_context(task_id, db_path),
+        missing_block=_render_missing_block(missing_fields),
+        history_block=_render_history(logs),
+    )
+    caller = llm_fn or client.chat_json
+    try:
+        raw = caller(prompts.PREDISPATCH_ANALYSIS_SYSTEM, user_prompt)
+    except client.LLMError as exc:
+        raise ExecutionAnalysisError(f"大模型调用失败：{exc}") from exc
+
+    readiness, summary, issues = _parse_predispatch(raw)
+    issues = _merge_missing_issues(issues, missing_fields)
+
+    return {
+        "ok": True,
+        "kind": "analysis",
+        "executed": True,
+        "task_id": int(task_id),
+        "readiness": readiness,
+        "summary": summary,
+        "issues": issues,
+        "missing_fields": missing_fields,
+        # 规则层缺失项一律构成「暂不可直接下发」，不受模型结论影响
+        "blocking": bool(missing_fields) or readiness != READINESS_READY,
+        "model_used": True,
+        "level": level,
+        "days_left": days_left,
+        "error": "",
+    }
+
+
+def _predispatch_level(task: Mapping[str, Any], base_date: date) -> tuple[str, int | None]:
+    """计算提醒等级（仅作为参考信息展示，不参与是否分析的门槛判断）。"""
+    days_left = reminder_agent.compute_days_left(task.get("deadline"), base_date)
+    if days_left is None:
+        return "", None
+    return reminder_agent.compute_level(days_left), days_left
+
+
+def _render_missing_block(missing_fields: Sequence[str]) -> str:
+    """把规则层缺失项渲染成 Prompt 文本块。"""
+    if not missing_fields:
+        return "（未发现关键信息缺失）"
+    return "\n".join(
+        f"- {MISSING_FIELD_LABELS.get(field, field)}" for field in missing_fields
+    )
+
+
+def _parse_predispatch(raw: Any) -> tuple[str, str, list[dict[str, Any]]]:
+    """校验并提取模型的下发前分析结果。
+
+    校验不通过一律抛 ExecutionAnalysisError——不下发、不伪造结论。
+    """
+    if not isinstance(raw, Mapping):
+        raise ExecutionAnalysisError(
+            f"模型返回结构非法：期望对象，实际为 {type(raw).__name__}。"
+        )
+
+    readiness = str(raw.get("readiness") or "").strip()
+    if readiness not in READINESS_LEVELS:
+        raise ExecutionAnalysisError(f"模型返回的 readiness 非法：{readiness!r}。")
+
+    summary = raw.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ExecutionAnalysisError("模型返回缺少有效的 summary。")
+
+    raw_issues = raw.get("issues")
+    if not isinstance(raw_issues, list):
+        raise ExecutionAnalysisError(
+            f"模型返回的 issues 非法：期望列表，实际为 {type(raw_issues).__name__}。"
+        )
+
+    issues: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_issues):
+        if not isinstance(item, Mapping):
+            raise ExecutionAnalysisError(
+                f"issues[{index}] 非对象：{type(item).__name__}。"
+            )
+        problem = str(item.get("problem") or "").strip()
+        if not problem:
+            raise ExecutionAnalysisError(f"issues[{index}] 缺少 problem。")
+        severity = str(item.get("severity") or "medium").strip().lower()
+        field = str(item.get("field") or "none").strip().lower()
+        issues.append(
+            {
+                "problem": problem,
+                "cause": str(item.get("cause") or "").strip(),
+                "evidence": str(item.get("evidence") or "").strip(),
+                "suggestion": str(item.get("suggestion") or "").strip(),
+                "severity": severity if severity in ISSUE_SEVERITIES else "medium",
+                "field": field if field in ISSUE_FIELDS else "none",
+            }
+        )
+
+    return readiness, summary.strip(), issues
+
+
+def _merge_missing_issues(
+    issues: list[dict[str, Any]], missing_fields: Sequence[str]
+) -> list[dict[str, Any]]:
+    """把规则层确认缺失、但模型未提及的字段补成一条 issue。
+
+    设计取舍：模型漏报不影响「缺什么」这一客观事实，因此由代码兜底补齐，
+    保证管理者一定能看到全部缺失项，而不是依赖模型是否恰好提到。
+    """
+    covered = {str(item.get("field")) for item in issues}
+    merged = list(issues)
+    for field in missing_fields:
+        if field in covered:
+            continue
+        label = MISSING_FIELD_LABELS.get(field, field)
+        merged.append(
+            {
+                "problem": f"缺少{label}",
+                "cause": f"任务信息中「{label}」为空",
+                "evidence": f"任务信息 {field} 为 null",
+                "suggestion": f"请补充{label}后再下发",
+                "severity": "high" if field in BLOCKING_FIELDS else "medium",
+                "field": field,
+            }
+        )
+    return merged

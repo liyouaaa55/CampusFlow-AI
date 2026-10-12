@@ -27,11 +27,12 @@ import pandas as pd
 import streamlit as st
 
 from agent import reminder_agent, report_agent
-from database import models, sqlite_db
+from database import closure_store, models, sqlite_db
 from llm import client
 from tools import execution_tool
 from ui import labels
 from ui.components import cards, pipeline, state, styles
+from ui.pages import nav
 
 # 页面标题与副标题
 PAGE_TITLE: str = "智能驾驶舱"
@@ -68,7 +69,8 @@ def collect_findings(
     关注判定完全基于既有数据，不做推断：
       - 提醒等级为 即将到期 / 临期 / 已逾期；
       - 或风险等级为 red（高风险）；
-      - 或被标记为需补充信息（need_confirm）。
+      - 或被标记为需补充信息（need_confirm）；
+      - 且任务尚未正式闭环（task_closures 中无记录，与下发门禁同一口径）。
 
     每条返回：
         task_id / tone / tag / title / situation / advice
@@ -78,7 +80,13 @@ def collect_findings(
     findings: list[dict[str, Any]] = []
 
     for item in reminder_agent.check_all(db_path=db_path):
-        task = sqlite_db.get_task(int(item["task_id"]), db_path=db_path)
+        task_id = int(item["task_id"])
+        # 正式闭环任务不再纳入督办发现：判定依据是 task_closures 表是否存在记录
+        # （与 tools/task_dispatch.dispatch_task 完全同一口径）。
+        # **绝不**用 tasks.status == "completed" 代替——闭环不回写 status。
+        if closure_store.is_closed(task_id, db_path=db_path):
+            continue
+        task = sqlite_db.get_task(task_id, db_path=db_path)
         if task is None:
             continue
 
@@ -221,6 +229,7 @@ def _run_demo() -> None:
     planned: list[dict[str, Any]] = []
     with st.status("正在执行一键体验演示…", expanded=True) as status:
         st.markdown(styles.STATUS_MARKER, unsafe_allow_html=True)
+        st.markdown(styles.STATUS_ICON_CSS, unsafe_allow_html=True)
         st.write("① 载入内置会议纪要模板")
         st.write("② 文本解析")
         try:
@@ -238,7 +247,7 @@ def _run_demo() -> None:
 
     state.save_parsed(planned, pipeline.DEMO_FILE_LABEL, text)
     state.set_flash(f"一键体验演示已识别 {len(planned)} 项事项，请确认后入库。")
-    state.goto("事项智能识别")
+    state.goto(nav.PAGE_MATERIAL)
 
 def _render_ai_check() -> None:
     """AI 今日主动检查：总量 + 关注分类，数据全部来自真实统计。"""
@@ -304,7 +313,7 @@ def _render_findings() -> None:
         )
         if st.button("查看并处理 →", key=f"cf_go_task_{finding['task_id']}_{idx}"):
             state.set_focus_task(finding["task_id"])
-            state.goto("任务督办中心")
+            state.goto(nav.PAGE_TASKS)
         st.write("")
 
 def _render_kpi(dashboard: Mapping[str, Any]) -> None:

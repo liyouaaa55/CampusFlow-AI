@@ -1,5 +1,10 @@
-"""页面三：事项智能识别。
+"""识别结果编辑与确认入库（v3.0 起内联在「会议材料与任务生成」页内）。
 
+本模块不再作为独立主页面（原「事项智能识别」已并入会议材料页），对外提供：
+    render_inline(tasks)  在会议材料页内就地渲染「识别结果 → 修正 → 确认入库」
+    render()              兼容入口：保留页头与空状态，当前导航不再引用
+
+两个入口共用同一套展示与入库逻辑，避免两处实现漂移。
 展示 PlannerAgent 的输出（中文徽章 + 可编辑表格），人工修正后点击「确认入库」，
 调用 database.sqlite_db.batch_create() 写入任务数据库。
 
@@ -10,7 +15,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Mapping, Sequence
 
 import pandas as pd
@@ -20,6 +25,7 @@ from agent import planner_agent, reminder_agent
 from config import settings
 from database import sqlite_db
 from ui.components import cards, state, styles, tables
+from ui.pages import nav
 
 # 页面标题与副标题
 PAGE_TITLE: str = "事项智能识别"
@@ -54,7 +60,7 @@ EDITOR_COLUMNS: tuple[str, ...] = (
 
 
 def render() -> None:
-    """渲染事项智能识别页面。"""
+    """兼容入口：保留页头与空状态引导（当前导航已不再引用本页）。"""
     cards.page_header(PAGE_TITLE, PAGE_SUBTITLE)
 
     flash = state.pop_flash()
@@ -63,10 +69,19 @@ def render() -> None:
 
     tasks = state.get_parsed_tasks()
     if not tasks:
-        if cards.empty_state("暂无待确认事项", "请先上传会议纪要或任务台账。", "前往会议材料上传"):
-            state.goto("会议材料上传")
+        if cards.empty_state("暂无待确认事项", "请先上传会议纪要或任务台账。", "前往会议材料与任务生成"):
+            state.goto(nav.PAGE_MATERIAL)
         return
 
+    render_inline(tasks)
+
+
+def render_inline(tasks: Sequence[Mapping[str, Any]]) -> None:
+    """在会议材料页内就地渲染「识别结果 → 修正 → 确认入库」。
+
+    调用方负责页头与空状态；这里只渲染「已有识别结果」时的内容，
+    保证没有材料时界面上不会出现看似属于本次材料的识别结果。
+    """
     left, right = st.columns([10, 12], gap="large")
     with left:
         _render_overview(tasks)
@@ -209,7 +224,15 @@ def _column_config() -> dict[str, Any]:
 
 
 def _import_tasks(edited: pd.DataFrame) -> None:
-    """把人工确认后的表格写入数据库。"""
+    """把人工确认后的表格写入数据库，并把「本次任务」传给任务督办中心。
+
+    入库成功后做三件事（顺序固定）：
+        1. 用 batch_create() **真实返回**的任务 ID 作为「本次任务」的唯一依据
+           （不按标题、最大 ID、当前时间或"最后一条记录"猜测）；
+        2. 写入会话级「本次入库」记录，供第三页「本次生成的任务」视图使用；
+        3. 调用既有 focus 机制定位到本次任务，使第三页默认选中它。
+    若未拿到有效任务 ID，则不宣称成功、也不更新定位，避免误导成"已生成"。
+    """
     tasks = _rows_to_tasks(edited)
     if not tasks:
         st.error("没有可入库的任务（标题为空的行会被忽略）。")
@@ -223,9 +246,31 @@ def _import_tasks(edited: pd.DataFrame) -> None:
         st.error(f"入库失败：{exc}")
         return
 
+    created_ids = _created_ids(created)
+    if not created_ids:
+        st.error("入库未返回有效的任务记录，本次不会更新任务定位，请核对任务列表。")
+        return
+
     state.clear_parsed()
-    state.set_flash(f"已成功入库 {len(created)} 项任务。")
-    state.goto("任务督办中心")
+    state.set_last_import(created_ids, created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    state.set_focus_task(created_ids[0])
+    state.set_flash(
+        f"已成功入库 {len(created_ids)} 项任务，已定位到本次生成的任务。"
+    )
+    state.goto(nav.PAGE_TASKS)
+
+
+def _created_ids(created: Sequence[Mapping[str, Any]]) -> list[int]:
+    """从 batch_create() 的返回记录中取出真实任务 ID（保序、去重、跳过脏数据）。"""
+    ids: list[int] = []
+    for record in created or []:
+        try:
+            number = int(record.get("id"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if number not in ids:
+            ids.append(number)
+    return ids
 
 
 def _rows_to_tasks(edited: pd.DataFrame) -> list[dict[str, Any]]:

@@ -1,11 +1,11 @@
 """CampusFlow AI —— Streamlit 应用入口（V2.0 产品化界面）。
 
 职责：只做「页面配置 + 导航 + 分发」，所有业务逻辑都在 agent / tools / database 层：
-- 智能驾驶舱      ReportAgent 驾驶舱指标与今日督办建议
-- 会议材料上传    parser_tool → TaskAgent → PlannerAgent（结果暂存，不入库）
-- 事项智能识别    人工确认后 sqlite_db.batch_create() 入库
-- 任务督办中心    list_tasks / update_status / get_logs
-- 执行情况汇报    ReportAgent 周报与导出
+- 智能驾驶舱          ReportAgent 驾驶舱指标与今日督办建议
+- 会议材料与任务生成   parser_tool → TaskAgent → PlannerAgent → 人工确认 → batch_create 入库
+- 任务督办中心         下发前智能分析 → 管理者确认 → 通知预览 → 模拟下发
+- 执行反馈与检查       执行反馈 + 附件 + 状态同步 + 持续督办 → 核验 → 正式闭环
+- 工作检查报告         正式文字总结 + 完整任务明细表 + 导出（Word / Markdown）
 
 运行方式：streamlit run app.py
 """
@@ -18,8 +18,9 @@ from config import settings
 from ui.components import cards, state, styles
 from ui.pages import (
     dashboard_page,
+    inspection_page,
+    nav,
     report_page,
-    review_page,
     tasks_page,
     upload_page,
 )
@@ -27,22 +28,16 @@ from ui.pages import (
 # 产品定位文案（仅界面展示，不改动 config/settings.py）
 APP_SUBTITLE: str = "面向高校基层事务的 AI 闭环督办平台"
 
-# 五个页面的名称与顺序（侧边栏流程化导航）
-PAGES: tuple[str, ...] = (
-    "智能驾驶舱",
-    "会议材料上传",
-    "事项智能识别",
-    "任务督办中心",
-    "执行情况汇报",
-)
+# 页面名称与顺序的唯一来源见 ui/pages/nav.py
+PAGES: tuple[str, ...] = nav.PAGES
 
 # 页面 → 渲染函数
 PAGE_RENDERERS: dict[str, object] = {
-    "智能驾驶舱": dashboard_page.render,
-    "会议材料上传": upload_page.render,
-    "事项智能识别": review_page.render,
-    "任务督办中心": tasks_page.render,
-    "执行情况汇报": report_page.render,
+    nav.PAGE_DASHBOARD: dashboard_page.render,
+    nav.PAGE_MATERIAL: upload_page.render,
+    nav.PAGE_TASKS: tasks_page.render,
+    nav.PAGE_INSPECTION: inspection_page.render,
+    nav.PAGE_REPORT: report_page.render,
 }
 
 

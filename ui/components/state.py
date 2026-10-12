@@ -24,6 +24,10 @@ KEY_EXECUTION_TASK: str = "cf_execution_task_id"     # 计划所属 task_id（�
 KEY_EXECUTION_RESULT: str = "cf_execution_result"     # 执行结果（供 rerun 后展示）
 KEY_FOCUS_TASK: str = "cf_focus_task_id"           # 首页「查看并处理」跳转后要定位的任务
 
+# ---------- 下发前智能分析（v3.0 第一阶段）----------
+KEY_PREDISPATCH_RESULT: str = "cf_predispatch_result"   # 下发前分析结果（含问题清单）
+KEY_PREDISPATCH_TASK: str = "cf_predispatch_task_id"    # 结果所属 task_id（防串号）
+
 
 # ---------- 暂存识别结果 ----------
 
@@ -182,3 +186,87 @@ def pop_focus_task() -> int | None:
     """取出并清除目标任务；无则返回 None。"""
     value = st.session_state.pop(KEY_FOCUS_TASK, None)
     return int(value) if value is not None else None
+
+
+# ---------- 本次入库任务（仅当前会话，不落库）----------
+#
+# 只保存 batch_create() **真实返回**的任务 ID，供「任务督办中心」的
+# 「本次生成的任务」视图与默认定位使用。
+# 系统当前没有材料来源/批次字段，因此这里是唯一的"本次"依据；它只存活于
+# 当前会话，刷新或换会话即失效——界面必须如实标注，不得宣称已具备
+# 持久化的材料来源追溯。
+
+KEY_LAST_IMPORT_IDS: str = "cf_last_import_ids"    # 本次入库的真实任务 ID（有序）
+KEY_LAST_IMPORT_AT: str = "cf_last_import_at"      # 本次入库时间（供界面诚实标注）
+
+
+def _clean_ids(values: Any) -> list[int]:
+    """把任意输入清洗为「保序、去重、仅整数」的任务 ID 列表。"""
+    if not isinstance(values, (list, tuple)):
+        return []
+    result: list[int] = []
+    for value in values:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number not in result:
+            result.append(number)
+    return result
+
+
+def set_last_import(task_ids: Sequence[int], created_at: str) -> None:
+    """记录本次入库创建的真实任务 ID 集合（空集合视为无效，不覆盖已有记录）。"""
+    cleaned = _clean_ids(list(task_ids))
+    if not cleaned:
+        return
+    st.session_state[KEY_LAST_IMPORT_IDS] = cleaned
+    st.session_state[KEY_LAST_IMPORT_AT] = str(created_at or "")
+
+
+def get_last_import_ids() -> list[int]:
+    """读取本次入库的任务 ID 集合；无记录或数据损坏时返回空列表。"""
+    return _clean_ids(st.session_state.get(KEY_LAST_IMPORT_IDS))
+
+
+def get_last_import_at() -> str:
+    """读取本次入库时间；无记录时返回空字符串。"""
+    return str(st.session_state.get(KEY_LAST_IMPORT_AT) or "")
+
+
+def clear_last_import() -> None:
+    """清除本次入库记录。"""
+    st.session_state.pop(KEY_LAST_IMPORT_IDS, None)
+    st.session_state.pop(KEY_LAST_IMPORT_AT, None)
+
+
+# ---------- 下发前智能分析结果（v3.0 第一阶段）----------
+#
+# 与处置计划（KEY_EXECUTION_PLAN）同一套防串号思路：结果与 task_id 成对保存，
+# 读取时校验 task_id，避免「切换任务后把上一个任务的分析结果显示出来」。
+
+
+def save_predispatch(task_id: int, result: dict[str, Any]) -> None:
+    """保存下发前分析结果（按钮点击后 rerun，必须落到 session_state）。"""
+    st.session_state[KEY_PREDISPATCH_RESULT] = dict(result)
+    st.session_state[KEY_PREDISPATCH_TASK] = int(task_id)
+
+
+def get_predispatch(task_id: int) -> dict[str, Any] | None:
+    """读取属于该任务的下发前分析结果；任务不匹配或不存在时返回 None。"""
+    result = st.session_state.get(KEY_PREDISPATCH_RESULT)
+    owner = st.session_state.get(KEY_PREDISPATCH_TASK)
+    if not result or owner is None:
+        return None
+    try:
+        if int(owner) != int(task_id):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return dict(result)
+
+
+def clear_predispatch() -> None:
+    """清除下发前分析结果（切换任务或信息变更后调用）。"""
+    st.session_state.pop(KEY_PREDISPATCH_RESULT, None)
+    st.session_state.pop(KEY_PREDISPATCH_TASK, None)

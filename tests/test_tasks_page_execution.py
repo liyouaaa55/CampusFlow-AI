@@ -1,4 +1,7 @@
-"""P0-6A：任务督办中心「智能处置」接入测试。
+"""执行期督办（ui/pages/execution_panel.py）接入测试。
+
+v3.0 第三阶段：本文件原先覆盖 task_page 上的「智能处置」，该实现已抽取为
+独立模块 `ui/pages/execution_panel.py`，断言目标随之迁移；测试内容与强度不变。
 
 测试分层：
 1. **业务动作层**（run_analysis / confirm_execution / reject_execution）
@@ -27,7 +30,7 @@ from llm import client
 from tools import execution_tool as et
 from ui import labels
 from ui.components import state, tables
-from ui.pages import tasks_page
+from ui.pages import execution_panel, tasks_page
 
 # ============================================================
 # 固定基准数据
@@ -102,7 +105,7 @@ def test_analyze_works_for_each_actionable_level(db: Path, deadline: str) -> Non
     task = seed(db, deadline=deadline)
     spy = SpyLLM()
 
-    outcome = tasks_page.run_analysis(task["id"], llm_fn=spy, db_path=db, today=BASE_DATE)
+    outcome = execution_panel.run_analysis(task["id"], llm_fn=spy, db_path=db, today=BASE_DATE)
 
     assert spy.calls == 1
     assert outcome["ok"] is True
@@ -114,7 +117,7 @@ def test_normal_task_produces_no_action(db: Path) -> None:
     task = seed(db, deadline=DEADLINE_NORMAL)
     spy = SpyLLM()
 
-    outcome = tasks_page.run_analysis(task["id"], llm_fn=spy, db_path=db, today=BASE_DATE)
+    outcome = execution_panel.run_analysis(task["id"], llm_fn=spy, db_path=db, today=BASE_DATE)
 
     assert outcome["ok"] is False
     assert outcome["kind"] == "no_action"
@@ -127,7 +130,7 @@ def test_completed_task_never_calls_llm(db: Path) -> None:
     task = seed(db, status="completed")
     spy = SpyLLM()
 
-    outcome = tasks_page.run_analysis(task["id"], llm_fn=spy, db_path=db, today=BASE_DATE)
+    outcome = execution_panel.run_analysis(task["id"], llm_fn=spy, db_path=db, today=BASE_DATE)
 
     assert outcome["ok"] is False
     assert spy.calls == 0
@@ -138,7 +141,7 @@ def test_task_without_deadline_never_calls_llm(db: Path) -> None:
     task = seed(db, deadline=None)
     spy = SpyLLM()
 
-    outcome = tasks_page.run_analysis(task["id"], llm_fn=spy, db_path=db, today=BASE_DATE)
+    outcome = execution_panel.run_analysis(task["id"], llm_fn=spy, db_path=db, today=BASE_DATE)
 
     assert outcome["ok"] is False
     assert spy.calls == 0
@@ -156,11 +159,11 @@ def test_run_analysis_returns_chinese_error_without_traceback(
     monkeypatch.setattr(client, "chat_json", boom)
 
     # run_analysis 必须吞掉异常并转成中文提示，绝不把异常抛给页面
-    outcome = tasks_page.run_analysis(task["id"], db_path=db, today=BASE_DATE)
+    outcome = execution_panel.run_analysis(task["id"], db_path=db, today=BASE_DATE)
 
     assert outcome["ok"] is False
     assert outcome["kind"] == "analysis_error"
-    assert outcome["message"] == tasks_page.MSG_ANALYSIS_FAILED
+    assert outcome["message"] == execution_panel.MSG_ANALYSIS_FAILED
     assert "Traceback" not in outcome["message"]
     assert "secret.py" not in outcome["message"]
     assert "LLMError" not in outcome["message"]
@@ -174,7 +177,7 @@ def test_confirm_execution_never_leaks_internals(db: Path) -> None:
     plan = _plan_for(db, task["id"])
     plan["action"] = "不存在的动作"
 
-    outcome = tasks_page.confirm_execution(plan, db_path=db, today=BASE_DATE)
+    outcome = execution_panel.confirm_execution(plan, db_path=db, today=BASE_DATE)
 
     assert outcome["ok"] is False
     for token in ("Traceback", "sqlite3", ".py", "Error:", "Exception"):
@@ -189,7 +192,7 @@ def test_confirm_execution_never_leaks_internals(db: Path) -> None:
 
 def _plan_for(db_path: Path, task_id: int) -> dict[str, Any]:
     """跑一次分析并返回可确认的计划。"""
-    outcome = tasks_page.run_analysis(task_id, llm_fn=SpyLLM(), db_path=db_path, today=BASE_DATE)
+    outcome = execution_panel.run_analysis(task_id, llm_fn=SpyLLM(), db_path=db_path, today=BASE_DATE)
     assert outcome["ok"] is True
     return outcome["plan"]
 
@@ -200,7 +203,7 @@ def test_draft_notify_executes_and_writes_events(db: Path) -> None:
     plan = _plan_for(db, task["id"])
     assert plan["action"] == et.ACTION_DRAFT_NOTIFY
 
-    outcome = tasks_page.confirm_execution(plan, db_path=db, today=BASE_DATE)
+    outcome = execution_panel.confirm_execution(plan, db_path=db, today=BASE_DATE)
 
     assert outcome["ok"] is True
     assert actions(db, task["id"]) == [
@@ -221,7 +224,7 @@ def test_request_info_executes_and_writes_events(db: Path) -> None:
     plan = _plan_for(db, task["id"])
     assert plan["action"] == et.ACTION_REQUEST_INFO
 
-    outcome = tasks_page.confirm_execution(plan, db_path=db, today=BASE_DATE)
+    outcome = execution_panel.confirm_execution(plan, db_path=db, today=BASE_DATE)
 
     assert outcome["ok"] is True
     assert actions(db, task["id"]) == [
@@ -240,7 +243,7 @@ def test_escalate_changes_risk_level_and_events(db: Path) -> None:
     plan = _plan_for(db, task["id"])
     assert plan["action"] == et.ACTION_ESCALATE
 
-    outcome = tasks_page.confirm_execution(plan, db_path=db, today=BASE_DATE)
+    outcome = execution_panel.confirm_execution(plan, db_path=db, today=BASE_DATE)
 
     assert outcome["ok"] is True
     after = sqlite_db.get_task(task["id"], db_path=db)
@@ -259,7 +262,7 @@ def test_escalate_never_sets_urgent_status(db: Path) -> None:
     """用例 15：提级督办绝不把 status 改成临期/已逾期。"""
     task = seed(db, risk_level="green", status="processing")
     plan = _plan_for(db, task["id"])
-    tasks_page.confirm_execution(plan, db_path=db, today=BASE_DATE)
+    execution_panel.confirm_execution(plan, db_path=db, today=BASE_DATE)
 
     after = sqlite_db.get_task(task["id"], db_path=db)
     assert after["status"] not in ("urgent", "overdue")
@@ -270,10 +273,10 @@ def test_confirm_does_not_call_llm_again(db: Path) -> None:
     """用例 10：点击确认不得再次调用大模型。"""
     task = seed(db)
     spy = SpyLLM()
-    outcome = tasks_page.run_analysis(task["id"], llm_fn=spy, db_path=db, today=BASE_DATE)
+    outcome = execution_panel.run_analysis(task["id"], llm_fn=spy, db_path=db, today=BASE_DATE)
     assert spy.calls == 1
 
-    tasks_page.confirm_execution(outcome["plan"], db_path=db, today=BASE_DATE)
+    execution_panel.confirm_execution(outcome["plan"], db_path=db, today=BASE_DATE)
 
     assert spy.calls == 1, "确认执行阶段不应重新调用大模型"
 
@@ -289,12 +292,12 @@ def test_reject_writes_event_and_allows_reanalysis(db: Path) -> None:
     plan = _plan_for(db, task["id"])
     assert actions(db, task["id"]) == [models.ACTION_CREATE, models.ACTION_ANALYZE]
 
-    outcome = tasks_page.reject_execution(plan, db_path=db)
+    outcome = execution_panel.reject_execution(plan, db_path=db)
 
     assert outcome["ok"] is True
     assert actions(db, task["id"])[-1] == models.ACTION_REJECT
     # reject 不构成去重依据，应能再次分析
-    again = tasks_page.run_analysis(task["id"], llm_fn=SpyLLM(), db_path=db, today=BASE_DATE)
+    again = execution_panel.run_analysis(task["id"], llm_fn=SpyLLM(), db_path=db, today=BASE_DATE)
     assert again["ok"] is True
     assert actions(db, task["id"]).count(models.ACTION_ANALYZE) == 2
 
@@ -305,7 +308,7 @@ def test_reject_does_not_change_task_data(db: Path) -> None:
     plan = _plan_for(db, task["id"])
     before = sqlite_db.get_task(task["id"], db_path=db)
 
-    tasks_page.reject_execution(plan, db_path=db)
+    execution_panel.reject_execution(plan, db_path=db)
 
     assert sqlite_db.get_task(task["id"], db_path=db) == before
 
@@ -325,14 +328,14 @@ def test_second_execution_of_same_plan_is_blocked(db: Path, deadline: str) -> No
     task = seed(db, deadline=deadline, risk_level="green")
     plan = _plan_for(db, task["id"])
 
-    first = tasks_page.confirm_execution(plan, db_path=db, today=BASE_DATE)
+    first = execution_panel.confirm_execution(plan, db_path=db, today=BASE_DATE)
     assert first["ok"] is True
 
     # 用同一份旧计划再执行一次
-    second = tasks_page.confirm_execution(plan, db_path=db, today=BASE_DATE)
+    second = execution_panel.confirm_execution(plan, db_path=db, today=BASE_DATE)
 
     assert second["ok"] is False
-    assert second["message"] == tasks_page.MSG_STALE_PLAN
+    assert second["message"] == execution_panel.MSG_STALE_PLAN
     # 事件链里不允许出现重复的动作事件
     log_actions = actions(db, task["id"])
     assert log_actions.count(models.ACTION_CONFIRM) == 1
@@ -348,10 +351,10 @@ def test_stale_plan_blocked_after_external_change(db: Path) -> None:
     # 模拟「另一个操作先把风险等级提到 red」
     sqlite_db.update_risk_level(task["id"], "red", operator="李老师", remark="外部改动", db_path=db)
 
-    outcome = tasks_page.confirm_execution(plan, db_path=db, today=BASE_DATE)
+    outcome = execution_panel.confirm_execution(plan, db_path=db, today=BASE_DATE)
 
     assert outcome["ok"] is False
-    assert outcome["message"] == tasks_page.MSG_STALE_PLAN
+    assert outcome["message"] == execution_panel.MSG_STALE_PLAN
     # 不得再写一次 escalate
     assert actions(db, task["id"]).count(models.ACTION_ESCALATE) == 1
 
@@ -363,7 +366,7 @@ def test_stale_plan_blocked_after_status_becomes_completed(db: Path) -> None:
 
     sqlite_db.update_status(task["id"], "completed", operator="王老师", remark="已完成", db_path=db)
 
-    outcome = tasks_page.confirm_execution(plan, db_path=db, today=BASE_DATE)
+    outcome = execution_panel.confirm_execution(plan, db_path=db, today=BASE_DATE)
 
     assert outcome["ok"] is False
     assert actions(db, task["id"]).count(models.ACTION_CONFIRM) == 0
@@ -385,7 +388,7 @@ def test_validator_blocks_illegal_actions_at_page_layer(db: Path, bad_action: st
     plan["action"] = bad_action
     plan["params"] = {"status": "completed", "owner": "张三"}
 
-    outcome = tasks_page.confirm_execution(plan, db_path=db, today=BASE_DATE)
+    outcome = execution_panel.confirm_execution(plan, db_path=db, today=BASE_DATE)
 
     assert outcome["ok"] is False
     # 不得写入任何动作事件
@@ -401,7 +404,7 @@ def test_plan_without_confirm_flag_is_rejected(db: Path) -> None:
     plan = _plan_for(db, task["id"])
     plan["need_confirm"] = False
 
-    outcome = tasks_page.confirm_execution(plan, db_path=db, today=BASE_DATE)
+    outcome = execution_panel.confirm_execution(plan, db_path=db, today=BASE_DATE)
 
     assert outcome["ok"] is False
     assert models.ACTION_CONFIRM not in actions(db, task["id"])
@@ -452,7 +455,7 @@ def test_execution_result_survives_rerun(db: Path) -> None:
     """执行结果（提醒草稿内容）跨 rerun 仍可见。"""
     task = seed(db, deadline=DEADLINE_DUE_SOON)
     plan = _plan_for(db, task["id"])
-    outcome = tasks_page.confirm_execution(plan, db_path=db, today=BASE_DATE)
+    outcome = execution_panel.confirm_execution(plan, db_path=db, today=BASE_DATE)
 
     state.save_execution_result({"task_id": task["id"], "message": outcome["message"]})
     restored = state.get_execution_result()
@@ -504,59 +507,60 @@ def test_page_user_facing_text_has_no_english_enums() -> None:
         "risk_level:",
     )
     user_facing = [
-        tasks_page.SECTION_EXECUTION,
-        tasks_page.CAPTION_EXECUTION,
-        tasks_page.BUTTON_ANALYZE,
-        tasks_page.BUTTON_CONFIRM,
-        tasks_page.BUTTON_CANCEL,
-        tasks_page.LABEL_SITUATION,
-        tasks_page.LABEL_REASONS,
-        tasks_page.LABEL_ACTION,
-        tasks_page.LABEL_RISK_NOTE,
-        tasks_page.HINT_NO_ACTION,
-        tasks_page.HINT_DRAFT_TAIL,
-        tasks_page.HINT_REQUEST_TAIL,
-        tasks_page.HINT_CONFIRM_REQUIRED,
-        tasks_page.MSG_ANALYSIS_FAILED,
-        tasks_page.MSG_DB_CONFLICT,
-        tasks_page.MSG_VALIDATOR_REJECTED,
-        tasks_page.MSG_STALE_PLAN,
-        tasks_page.MSG_EXECUTE_FAILED,
-        tasks_page.MSG_REJECTED,
-        *tasks_page.RESULT_MESSAGES.values(),
+        execution_panel.SECTION_EXECUTION,
+        execution_panel.CAPTION_EXECUTION,
+        execution_panel.BUTTON_ANALYZE,
+        execution_panel.BUTTON_CONFIRM,
+        execution_panel.BUTTON_CANCEL,
+        execution_panel.LABEL_SITUATION,
+        execution_panel.LABEL_REASONS,
+        execution_panel.LABEL_ACTION,
+        execution_panel.LABEL_RISK_NOTE,
+        execution_panel.HINT_NO_ACTION,
+        execution_panel.HINT_DRAFT_TAIL,
+        execution_panel.HINT_REQUEST_TAIL,
+        execution_panel.HINT_CONFIRM_REQUIRED,
+        execution_panel.MSG_ANALYSIS_FAILED,
+        execution_panel.MSG_DB_CONFLICT,
+        execution_panel.MSG_VALIDATOR_REJECTED,
+        execution_panel.MSG_STALE_PLAN,
+        execution_panel.MSG_EXECUTE_FAILED,
+        execution_panel.MSG_REJECTED,
+        *execution_panel.RESULT_MESSAGES.values(),
     ]
     for text in user_facing:
         for token in forbidden:
             assert token not in text, f"页面文案「{text}」泄漏了内部枚举 {token}"
 
 
-def test_tasks_page_does_not_define_its_own_label_maps() -> None:
-    """映射必须统一来自 ui/labels.py，页面不得自建字典。"""
-    source = inspect.getsource(tasks_page)
+def test_execution_panel_does_not_define_its_own_label_maps() -> None:
+    """映射必须统一来自 ui/labels.py，执行期督办模块不得自建字典。"""
+    source = inspect.getsource(execution_panel)
     for forbidden in ("ACTION_LABELS =", "LEVEL_LABELS =", "RISK_LABELS =", "LOG_ACTION_LABELS ="):
         assert forbidden not in source
-    # 页面必须确实走 labels 模块
+    # 必须确实走 labels 模块
     assert "labels.action_label(" in source
 
 
-def test_tasks_page_has_no_send_capability() -> None:
-    """页面层不得出现任何外发能力。"""
-    source = inspect.getsource(tasks_page)
-    for forbidden in ("smtplib", "sendmail", "SMTP(", "requests.post", "urllib"):
-        assert forbidden not in source
+def test_ui_modules_have_no_send_capability() -> None:
+    """页面层与执行期督办模块都不得出现任何外发能力。"""
+    for module in (tasks_page, execution_panel):
+        source = inspect.getsource(module)
+        for forbidden in ("smtplib", "sendmail", "SMTP(", "requests.post", "urllib"):
+            assert forbidden not in source, f"{module.__name__} 出现外发能力 {forbidden}"
 
 
 def test_result_messages_describe_actions_accurately() -> None:
     """文案不得把草稿说成「发送」，也不得把提级说成「改状态」。"""
-    draft = tasks_page.RESULT_MESSAGES[et.ACTION_DRAFT_NOTIFY]
+    draft = execution_panel.RESULT_MESSAGES[et.ACTION_DRAFT_NOTIFY]
     assert "草稿" in draft
     assert "发送" not in draft
 
-    escalate = tasks_page.RESULT_MESSAGES[et.ACTION_ESCALATE]
+    escalate = execution_panel.RESULT_MESSAGES[et.ACTION_ESCALATE]
     assert "风险等级" in escalate
     assert "状态" not in escalate
 
-    request = tasks_page.RESULT_MESSAGES[et.ACTION_REQUEST_INFO]
+    request = execution_panel.RESULT_MESSAGES[et.ACTION_REQUEST_INFO]
     assert "补充" in request
     assert "自动修改" not in request
 
@@ -586,6 +590,7 @@ def test_all_ui_modules_import_cleanly() -> None:
         "ui.pages.report_page",
         "ui.pages.review_page",
         "ui.pages.tasks_page",
+        "ui.pages.execution_panel",
         "ui.pages.upload_page",
     ):
         module = importlib.import_module(module_path)

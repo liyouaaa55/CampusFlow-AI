@@ -160,6 +160,7 @@ USER_PROMPT = """请根据以下任务信息撰写一段正式的中文工作通
 def generate_notice(
     task: dict[str, Any],
     llm_fn: LlmFn | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """生成下发信息。
 
@@ -167,6 +168,8 @@ def generate_notice(
 
     返回 dict：
         title / body / fields  展示用
+        execution_requirements / closure_criteria / closure_confirmed /
+        closure_source  来自任务办结标准（仅当传入 metadata 时填充）
         source                 "llm" 或 "template"，便于界面标注实际来源
         degraded               True 表示发生过降级（LLM 不可用或不合格）
 
@@ -175,7 +178,15 @@ def generate_notice(
     fallback = render_template(task)
 
     if not dispatch_ready(task):
-        return {**fallback, "source": "template", "degraded": False}
+        return {
+            **fallback,
+            "source": "template",
+            "degraded": False,
+            "execution_requirements": [],
+            "closure_criteria": [],
+            "closure_confirmed": False,
+            "closure_source": None,
+        }
 
     caller = llm_fn
     if caller is None:
@@ -184,7 +195,15 @@ def generate_notice(
 
             caller = client.chat_json
         except Exception:
-            return {**fallback, "source": "template", "degraded": True}
+            return {
+                **fallback,
+                "source": "template",
+                "degraded": True,
+                "execution_requirements": [],
+                "closure_criteria": [],
+                "closure_confirmed": False,
+                "closure_source": None,
+            }
 
     prompt = USER_PROMPT.format(
         title=str(task.get("title") or ""),
@@ -198,10 +217,80 @@ def generate_notice(
         raw = caller(SYSTEM_PROMPT, prompt)
     except Exception:
         # 超时、限流、未配置 Key、网络异常……一律降级，绝不向上抛
-        return {**fallback, "source": "template", "degraded": True}
+        base = {**fallback, "source": "template", "degraded": True}
+        return _attach_metadata(base, task, metadata)
 
     normalized = _normalize(raw, task)
     if normalized is None:
-        return {**fallback, "source": "template", "degraded": True}
+        base = {**fallback, "source": "template", "degraded": True}
+        return _attach_metadata(base, task, metadata)
 
-    return {**normalized, "source": "llm", "degraded": False}
+    base = {**normalized, "source": "llm", "degraded": False}
+    return _attach_metadata(base, task, metadata)
+
+
+def _attach_metadata(
+    notice: dict[str, Any],
+    task: dict[str, Any],
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """把办理要求与已确认的办结标准并入通知，绝不虚构。
+
+    - metadata 为 None（如直接单元测试未传入）时保持原通知不变；
+    - 办结标准若未确认，明确标注「仅供参考，不作为强制要求」，
+      杜绝把 AI 建议或未确认标准包装成正式要求；
+    - 标准缺失时明确提示用户去执行检查页完善，而不是沉默带过。
+    """
+    if metadata is None:
+        return {
+            **notice,
+            "execution_requirements": [],
+            "closure_criteria": [],
+            "closure_confirmed": False,
+            "closure_source": None,
+        }
+
+    desc = str(task.get("description") or "").strip()
+    reqs = [desc] if desc else []
+    reqs += list(metadata.get("execution_requirements") or [])
+    crit = list(metadata.get("closure_criteria") or [])
+    confirmed = bool(metadata.get("closure_confirmed"))
+
+    body = str(notice.get("body") or "")
+    lines: list[str] = []
+    if reqs:
+        lines.append("【办理要求】" + "；".join(reqs))
+    if crit:
+        state = (
+            "已确认，作为正式办结依据"
+            if confirmed
+            else "尚未经督办人员确认，仅供参考，不作为强制要求"
+        )
+        lines.append("【办结标准】" + "；".join(crit) + f"（{state}）")
+    else:
+        lines.append("【办结标准】尚未设置，请在执行检查页完善并确认后再作为正式要求。")
+    risk = str(task.get("risk_level") or "")
+    if risk == "red":
+        lines.append("【风险提示】高风险任务，请重点保障质量与时效。")
+    if lines:
+        body = body + "\n\n" + "\n".join(lines)
+
+    fields = list(notice.get("fields") or [])
+    if reqs:
+        fields.append(("办理要求", "；".join(reqs)))
+    if crit:
+        fields.append(
+            ("办结标准", "；".join(crit) + ("（已确认）" if confirmed else "（待确认）"))
+        )
+    else:
+        fields.append(("办结标准", "尚未设置"))
+
+    return {
+        **notice,
+        "body": body,
+        "fields": fields,
+        "execution_requirements": reqs,
+        "closure_criteria": crit,
+        "closure_confirmed": confirmed,
+        "closure_source": metadata.get("closure_source"),
+    }

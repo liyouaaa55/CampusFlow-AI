@@ -35,7 +35,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 from config import settings
 from database import models
@@ -309,6 +309,109 @@ def update_risk_level(
     return _row_to_dict(updated)
 
 
+# 允许人工修正的任务字段（白名单，封闭集合）
+#
+# 为什么需要这个入口（v3.0 第一阶段）：
+#   下发前检查会指出「负责人 / 截止时间 / 执行要求」等关键信息缺失。
+#   若任务在第二阶段（识别 → 确认）时未补齐，管理者必须在督办页当场补齐，
+#   否则任务将永远无法下发。原先只有 update_status / update_risk_level，
+#   无法修正业务字段，导致「要求补充」在界面上无处落地。
+EDITABLE_TASK_FIELDS: tuple[str, ...] = (
+    "title",
+    "department",
+    "owner",
+    "deadline",
+    "priority",
+    "description",
+)
+
+
+def update_task_fields(
+    task_id: int,
+    fields: Mapping[str, Any],
+    operator: str = models.DEFAULT_OPERATOR,
+    remark: str = "",
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """人工修正任务的可编辑字段（标题/部门/负责人/截止/优先级/说明）。
+
+    设计边界：
+    1. 只允许 EDITABLE_TASK_FIELDS 白名单内的字段，未知字段直接报错；
+    2. 空字符串统一视为「清空」（存 NULL），便于管理者把错误信息清掉；
+    3. 与 update_status / update_risk_level 一致：同一事务内写入
+       task_logs 留痕，并使用乐观锁（updated_at）防止覆盖他人修改；
+    4. 日志动作用 models.ACTION_CONFIRM（人工确认/修正），
+       因为 models.LOG_ACTIONS 是封闭清单，扩展新动作会破坏既有契约测试。
+       具体改了哪些字段写在 remark 里，保证可审计。
+
+    返回：更新后的完整记录。
+    异常：TypeError  fields 不是映射；
+         ValueError 含未知字段 / 标题被清空 / 优先级或截止时间非法；
+         TaskNotFoundError 任务不存在；
+         ConcurrentUpdateError 期间任务被其他操作修改。
+    """
+    if not isinstance(fields, Mapping):
+        raise TypeError(f"fields 必须是映射类型，收到：{type(fields).__name__}")
+
+    unknown = [key for key in fields if key not in EDITABLE_TASK_FIELDS]
+    if unknown:
+        raise ValueError(
+            f"不允许修改的字段：{'/'.join(sorted(map(str, unknown)))}"
+            f"（允许值：{'/'.join(EDITABLE_TASK_FIELDS)}）"
+        )
+    if not fields:
+        raise ValueError("fields 不能为空，至少需要提供一个待修改字段。")
+
+    updates: dict[str, Any] = {}
+    for key, value in fields.items():
+        if key == "deadline":
+            updates[key] = _normalize_deadline(value)
+        elif key == "priority":
+            text = _clean_text(value)
+            if text is not None and text not in models.PRIORITIES:
+                raise ValueError(
+                    f"优先级非法：{text}（允许值：{'/'.join(models.PRIORITIES)}）"
+                )
+            updates[key] = text
+        else:
+            updates[key] = _clean_text(value)
+
+    # 标题是必填项：允许修正，但不允许清空
+    if "title" in updates and not updates["title"]:
+        raise ValueError("任务标题不能为空。")
+
+    timestamp = now_iso()
+    columns = ", ".join(f"{key} = ?" for key in updates)
+    values: list[Any] = [*updates.values(), timestamp]
+
+    with get_connection(db_path) as connection:
+        existing = _fetch_task(connection, task_id)
+        if existing is None:
+            raise TaskNotFoundError(f"任务不存在：id={task_id}")
+
+        previous_updated = existing["updated_at"]
+        cursor = connection.execute(
+            f"UPDATE {models.TABLE_TASKS} SET {columns}, updated_at = ? "
+            "WHERE id = ? AND updated_at IS ?",
+            (*values, int(task_id), previous_updated),
+        )
+        if cursor.rowcount == 0:
+            raise ConcurrentUpdateError(
+                f"任务 #{task_id} 已被其他操作修改，本次信息修正已取消，请重新读取后再试。"
+            )
+
+        _insert_log(
+            connection,
+            task_id=int(task_id),
+            action=models.ACTION_CONFIRM,
+            operator=operator,
+            remark=remark or "人工修正任务信息",
+        )
+        updated = _fetch_task(connection, task_id)
+
+    return _row_to_dict(updated)
+
+
 def append_log(
     task_id: int,
     action: str,
@@ -445,10 +548,16 @@ def list_tasks(
     status: str | None = None,
     department: str | None = None,
     db_path: str | Path | None = None,
+    *,
+    newest_first: bool = False,
 ) -> list[dict[str, Any]]:
     """查询任务列表，支持按状态、部门筛选。
 
-    两个条件同时给出时取交集；均为空则返回全部任务（按入库顺序）。
+    两个条件同时给出时取交集；均为空则返回全部任务。
+    排序：
+        newest_first=False（默认，保持既有契约）—— 按入库顺序（id 升序）；
+        newest_first=True —— 按最新创建优先（id 降序），供「任务督办中心」等
+        展示场景使用。两种排序都返回同一批任务，只改变展示顺序，不影响任何业务数据。
     异常：ValueError 传入未知状态。
     """
     sql = f"SELECT {', '.join(models.TASK_ALL_COLUMNS)} FROM {models.TABLE_TASKS}"
@@ -466,7 +575,7 @@ def list_tasks(
 
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
-    sql += " ORDER BY id ASC"
+    sql += " ORDER BY id DESC" if newest_first else " ORDER BY id ASC"
 
     with get_connection(db_path) as connection:
         rows = connection.execute(sql, params).fetchall()

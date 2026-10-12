@@ -51,6 +51,29 @@ def test_status_marker_exists() -> None:
         assert forbidden not in marker.replace(" ", ""), f"STATUS_MARKER 不得包含 {forbidden}"
 
 
+def test_status_icon_css_hides_only_decoration() -> None:
+    """STATUS_ICON_CSS 只允许隐藏装饰图标，不得影响状态文字与解析正文。
+
+    背景：Streamlit 1.37 未加载 Material Icons 字体，st.status 标题左侧的
+    stExpanderIconCheck 会退化为英文单词 "check" 显示在界面上（实测确认）。
+    该规则由上传页与驾驶舱演示流程注入，必须保持作用域受限。
+    """
+    assert hasattr(styles, "STATUS_ICON_CSS"), "上传页与驾驶舱引用了 STATUS_ICON_CSS"
+    css = styles.STATUS_ICON_CSS
+    assert isinstance(css, str)
+    assert "<style" in css, "必须是可独立注入的完整 style 标签"
+    # 只允许命中 st.status 状态图标，不得波及普通 st.expander 的展开箭头
+    assert "stExpanderIconCheck" in css, "必须命中 st.status 状态图标 testid"
+    assert "stExpanderIconChevron" not in css, "不得影响普通 st.expander 箭头"
+    # 只隐藏图标本身，不得波及状态文字（解析完成）与 ①②③ 解析正文
+    assert "stMarkdownContainer" not in css, "不得作用于状态文字"
+    assert "display: none" in css
+    assert "!important" in css, "需压过 Streamlit 内联样式，否则可能被覆盖"
+    # 历史踩坑：锚点用不存在的类名导致规则静默失效，改为断言只用 testid 锚点
+    assert ":has(" not in css, "不依赖 :has()，其浏览器支持性不稳定"
+    assert "cf-status-marker" not in css, "该类名从未被注入，不可作为锚点"
+
+
 def test_known_constants_present() -> None:
     """关键常量逐个断言，避免逐个被删时才被发现。"""
     for name in (

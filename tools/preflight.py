@@ -727,7 +727,7 @@ def check_pipeline(
             )
 
         # ---------- 7. 执行动作 + 8. 执行留痕 ----------
-        # 严格复刻 ui/pages/tasks_page.py 的 confirm_execution 调用序列
+        # 严格复刻 ui/pages/execution_panel.py 的 confirm_execution 调用序列
         if overdue_id is not None and isinstance(plan, dict) and plan.get("action"):
             try:
                 before_logs = sqlite_db.get_logs(overdue_id, db_path=db_path)

@@ -57,10 +57,20 @@ def parse_file(file_path: str | Path) -> str:
 
     支持 .docx / .pdf / .txt / .md / .xlsx / .xls / .csv。
     异常：文件不存在抛 FileNotFoundError，格式不支持抛 ValueError。
+
+    特别说明：Office 在文档打开时会生成 `~$xxx.docx` 之类的临时锁文件，
+    其扩展名同样合法，但内容是二进制锁信息，直接交给 python-docx 会抛
+    PackageNotFoundError（并带出本机路径）。这里提前拒掉并给出中文提示。
     """
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"文件不存在：{path}")
+
+    if path.name.startswith("~$"):
+        raise ValueError(
+            f"「{path.name}」是 Office 打开文档时生成的临时锁文件，不是有效文档。"
+            "请关闭 Office 后上传正式文件。"
+        )
 
     suffix = path.suffix.lower()
     if suffix == ".docx":

@@ -106,13 +106,22 @@ LOG_ACTIONS: tuple[str, ...] = LOG_ACTIONS_STATUS + EVENT_ACTIONS
 ACTION_DISPATCH: str = "dispatch"   # 系统内任务下发
 ACTION_SUBMIT: str = "submit"      # 负责人提交工作回执
 
+# --- 结果核验与闭环动作（v2.2）：同样只写 task_logs，不并入 EVENT_ACTIONS ---
+ACTION_VERIFY: str = "verify"                  # 结果核验
+ACTION_NEED_SUPPLEMENT: str = "need_supplement"  # 核验不通过：要求补充材料
+ACTION_REJECT_REWORK: str = "reject_rework"      # 核验不通过：驳回重办
+ACTION_CLOSE: str = "close"                    # 核验通过，任务正式闭环
+
 # 允许写入 task_logs 的执行链路动作（封闭清单，不接受任意外来字符串）
 CHAIN_ACTIONS: tuple[str, ...] = (
     ACTION_DISPATCH,
     ACTION_SUBMIT,
+    ACTION_VERIFY,
+    ACTION_NEED_SUPPLEMENT,
+    ACTION_REJECT_REWORK,
+    ACTION_CLOSE,
 )
-
-# 全部可落库的日志动作（v2.0 契约 + v2.1 执行链路），供 UI 注册中文标签时参照
+# 全部可落库的日志动作（v2.0 契约 + v2.1/v2.2 执行链路），供 UI 注册中文标签时参照
 ALL_LOG_ACTIONS: tuple[str, ...] = LOG_ACTIONS + CHAIN_ACTIONS
 
 # ============================================================
@@ -240,8 +249,178 @@ CREATE TABLE IF NOT EXISTS task_submissions (
 # 建表语句集合，供 init_db() 按顺序执行
 # 说明：v2.1 的 task_submissions 追加在 v2.0 两张表之后，
 # CREATE_TASKS_SQL 与 CREATE_TASK_LOGS_SQL 一字未改，既有数据库文件无需迁移。
+# ============================================================
+# v2.2：提交内容指纹（核验绑定到具体版本）
+# ============================================================
+#
+# task_submissions 对 task_id 是 UNIQUE + upsert，同一行会被新内容覆盖，
+# submission_id 永不变化。仅凭 submission_id 无法区分「已核验的是哪一版内容」
+# ——旧版本的 approved 会被误套用到新版本上。
+# 用内容指纹而不是时间戳：同一秒内两次提交时间戳可能相同，且时间戳可被测试注入。
+VERIFICATION_SUBMISSION_DIGEST: str = "submission_digest"
+
+# ============================================================
+# v2.2：正式闭环记录（task_closures）
+# ============================================================
+#
+# 为什么不写进 tasks.status：
+#   1. tasks.status 六个取值无闭环态，新增需 ALTER TABLE 迁移；
+#   2. tasks 字段顺序被 5 处既有测试逐值锁定；
+#   3. 闭环是独立于执行状态的业务事实，塞进 status 会污染 reminder_agent
+#      排除集、report_agent 完成率与 submission_check 判定。
+# 一任务至多一次闭环由 task_id UNIQUE 保证。
+TABLE_TASK_CLOSURES: str = "task_closures"
+
+TASK_CLOSURE_COLUMNS: tuple[str, ...] = (
+    "task_id", "submission_id", "submission_digest", "verification_id",
+    "closed_by", "closed_at", "closure_note", "created_at",
+)
+TASK_CLOSURE_ALL_COLUMNS: tuple[str, ...] = ("id",) + TASK_CLOSURE_COLUMNS
+
+CREATE_TASK_CLOSURES_SQL: str = """
+CREATE TABLE IF NOT EXISTS task_closures (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id           INTEGER NOT NULL UNIQUE,
+    submission_id     INTEGER,
+    submission_digest TEXT,
+    verification_id   INTEGER NOT NULL,
+    closed_by         TEXT    NOT NULL,
+    closed_at         TEXT    NOT NULL,
+    closure_note      TEXT,
+    created_at        TEXT    NOT NULL,
+    FOREIGN KEY (task_id)       REFERENCES tasks (id)           ON DELETE CASCADE,
+    FOREIGN KEY (submission_id) REFERENCES task_submissions (id) ON DELETE SET NULL
+)
+"""
+
+# ============================================================
+# v2.2 结果核验（verifications）
+# ============================================================
+# 一任务可有多条核验记录（驳回→补充→再核验的轨迹要留得住），
+# 因此 task_id **不加 UNIQUE**。
+TABLE_VERIFICATIONS: str = "verifications"
+VERIFICATION_PENDING: str = "pending"
+VERIFICATION_APPROVED: str = "approved"
+VERIFICATION_NEED_SUPPLEMENT: str = "need_supplement"
+VERIFICATION_REJECTED: str = "rejected"
+VERIFICATION_MANUAL_REVIEW: str = "manual_review"
+VERIFICATION_STATUSES: tuple[str, ...] = (
+    VERIFICATION_PENDING, VERIFICATION_APPROVED, VERIFICATION_NEED_SUPPLEMENT,
+    VERIFICATION_REJECTED, VERIFICATION_MANUAL_REVIEW,
+)
+VERIFICATION_COLUMNS: tuple[str, ...] = (
+    "task_id", "submission_id", "submission_digest", "status", "reason", "requirement_match",
+    "deliverable_complete", "process_valid", "state_consistent",
+    "verified_by", "verified_at",
+)
+VERIFICATION_ALL_COLUMNS: tuple[str, ...] = ("id",) + VERIFICATION_COLUMNS
+VERIFICATION_SUBMISSION_DIGEST: str = "submission_digest"
+
+CREATE_VERIFICATIONS_SQL: str = """
+CREATE TABLE IF NOT EXISTS verifications (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id             INTEGER NOT NULL,
+    submission_id       INTEGER,
+    submission_digest   TEXT,
+    status              TEXT    NOT NULL,
+    reason              TEXT,
+    requirement_match   INTEGER NOT NULL DEFAULT 0,
+    deliverable_complete INTEGER NOT NULL DEFAULT 0,
+    process_valid       INTEGER NOT NULL DEFAULT 0,
+    state_consistent    INTEGER NOT NULL DEFAULT 0,
+    verified_by         TEXT,
+    verified_at         TEXT    NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE CASCADE,
+    FOREIGN KEY (submission_id) REFERENCES task_submissions (id) ON DELETE SET NULL
+)
+"""
+
+CREATE_VERIFICATION_INDEXES_SQL: str = """
+CREATE INDEX IF NOT EXISTS idx_verifications_task ON verifications (task_id)
+"""
+# ============================================================
+# v2.2 任务办理要求与办结标准（task_metadata）
+# ============================================================
+# 一任务至多一条（1:1），故 task_id 用 UNIQUE。
+# 不用 ALTER TABLE 加到 tasks 上：既有表 CREATE IF NOT EXISTS 是空操作，
+# 且 tasks 字段顺序被 5 处既有测试逐值锁定。
+TABLE_TASK_METADATA: str = "task_metadata"
+CLOSURE_SOURCE_MATERIAL: str = "material"
+CLOSURE_SOURCE_RULE: str = "rule"
+CLOSURE_SOURCE_AI: str = "ai"
+CLOSURE_SOURCE_MANUAL: str = "manual"
+CLOSURE_SOURCES: tuple[str, ...] = (
+    CLOSURE_SOURCE_MATERIAL, CLOSURE_SOURCE_RULE,
+    CLOSURE_SOURCE_AI, CLOSURE_SOURCE_MANUAL,
+)
+TASK_METADATA_COLUMNS: tuple[str, ...] = (
+    "task_id", "execution_requirements", "closure_criteria",
+    "closure_source", "closure_confirmed", "created_at", "updated_at",
+)
+TASK_METADATA_ALL_COLUMNS: tuple[str, ...] = ("id",) + TASK_METADATA_COLUMNS
+
+CREATE_TASK_METADATA_SQL: str = """
+CREATE TABLE IF NOT EXISTS task_metadata (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id               INTEGER NOT NULL UNIQUE,
+    execution_requirements TEXT,
+    closure_criteria      TEXT,
+    closure_source        TEXT,
+    closure_confirmed     INTEGER NOT NULL DEFAULT 0,
+    created_at            TEXT    NOT NULL,
+    updated_at            TEXT    NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE CASCADE
+)
+"""
+# ============================================================
+# v3.0 第二阶段：执行反馈（task_feedback）
+# ============================================================
+#
+# 为什么新增一张表，而不是改造 task_submissions：
+#   task_submissions 是「办理结果回执」，被核验与正式闭环通过内容指纹
+#   （submission_digest）强绑定，一个任务只有一行（UNIQUE + upsert）。
+#   如果改成多行，verification_store / closure_service 的版本绑定会整体失效。
+#
+#   而执行期反馈是另一件业务事实：管理者在任务执行期间可以**多次**录入
+#   「已完成 / 进行中」，需要保留完整轨迹，并能明确取到「最新有效反馈」。
+#   因此单列一张**追加式**的表，两个业务事实各自独立、互不覆盖：
+#       task_submissions  我交了什么（核验/闭环的锚点，一任务一行）
+#       task_feedback     执行进展如何（追加式，最新一条为当前有效反馈）
+TABLE_TASK_FEEDBACK: str = "task_feedback"
+
+# 反馈状态：只要两种（比赛版只有管理者代录）
+FEEDBACK_IN_PROGRESS: str = "in_progress"   # 进行中 / 暂未完成
+FEEDBACK_COMPLETED: str = "completed"       # 已完成
+FEEDBACK_STATUSES: tuple[str, ...] = (FEEDBACK_IN_PROGRESS, FEEDBACK_COMPLETED)
+
+TASK_FEEDBACK_COLUMNS: tuple[str, ...] = (
+    "task_id", "status", "note", "file_path", "operator", "created_at",
+)
+TASK_FEEDBACK_ALL_COLUMNS: tuple[str, ...] = ("id",) + TASK_FEEDBACK_COLUMNS
+
+CREATE_TASK_FEEDBACK_SQL: str = """
+CREATE TABLE IF NOT EXISTS task_feedback (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    INTEGER NOT NULL,
+    status     TEXT    NOT NULL,
+    note       TEXT,
+    file_path  TEXT,
+    operator   TEXT,
+    created_at TEXT    NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE CASCADE
+)
+"""
+
+CREATE_FEEDBACK_INDEXES_SQL: str = (
+    "CREATE INDEX IF NOT EXISTS idx_task_feedback_task ON task_feedback (task_id)"
+)
+
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE_TASKS_SQL,
     CREATE_TASK_LOGS_SQL,
     CREATE_TASK_SUBMISSIONS_SQL,
-) + CREATE_INDEXES_SQL
+    CREATE_VERIFICATIONS_SQL,
+    CREATE_TASK_METADATA_SQL,
+    CREATE_TASK_CLOSURES_SQL,
+    CREATE_TASK_FEEDBACK_SQL,
+) + CREATE_INDEXES_SQL + (CREATE_VERIFICATION_INDEXES_SQL, CREATE_FEEDBACK_INDEXES_SQL)

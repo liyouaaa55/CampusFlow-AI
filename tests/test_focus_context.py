@@ -81,10 +81,15 @@ def test_focus_panel_rendered_before_list() -> None:
     )
 
 
-def test_focus_panel_contains_execution_entry() -> None:
-    """当前处置任务区必须直接提供智能处置入口。"""
+def test_focus_panel_contains_predispatch_entry() -> None:
+    """当前处置任务区直接提供「下发前智能分析」入口。
+
+    v3.0 第二阶段：第三页只负责下发前流程，执行期督办已迁往第四页，
+    因此这里同时断言第三页**不再**渲染执行期处置面板。
+    """
     source = inspect.getsource(tp._render_focus_panel)
-    assert "_render_execution_panel" in source
+    assert "_render_predispatch_panel" in source
+    assert "_render_execution_panel" not in source, "执行期督办不得再出现在第三页"
     assert "scope=\"focus\"" in source or "scope='focus'" in source
 
 
@@ -118,9 +123,15 @@ def test_focus_task_may_be_missing() -> None:
 
 
 def test_execution_panel_scopes_widget_keys() -> None:
-    """同一任务在两处渲染时，widget key 必须按 scope 区分。"""
-    source = inspect.getsource(tp._render_execution_panel)
-    assert "scope: str = \"list\"" in source
+    """执行期督办面板的 widget key 必须按 scope 区分。
+
+    v3.0 第三阶段：该面板已从 tasks_page 抽取到 ui/pages/execution_panel.py，
+    断言目标随之迁移；key 命名规则（含 scope）保持不变。
+    """
+    from ui.pages import execution_panel
+
+    source = inspect.getsource(execution_panel.render_execution_panel)
+    assert 'scope: str = "inspection"' in source
     for part in ("analyze", "confirm", "cancel", "operator"):
         assert f"cf_exec_{{scope}}_{part}" in source, part
 
@@ -131,16 +142,23 @@ def test_execution_panel_scopes_widget_keys() -> None:
 
 
 def test_focus_panel_does_not_call_llm(monkeypatch: pytest.MonkeyPatch) -> None:
-    """渲染当前处置任务不调用大模型（分析仅在用户点击按钮时触发）。"""
+    """渲染当前处置任务不调用大模型（分析仅在用户点击按钮时触发）。
+
+    v3.0 第三阶段：执行期分析 run_analysis 已迁往 ui/pages/execution_panel.py；
+    这里同时断言第三页渲染路径既不引用它、也不触发任何模型调用。
+    """
     from llm import client
+    from ui.pages import execution_panel
 
     def boom(*args: object, **kwargs: object) -> object:
         raise AssertionError("不应调用大模型")
 
     monkeypatch.setattr(client, "chat_json", boom)
-    monkeypatch.setattr(tp, "run_analysis", boom)
+    monkeypatch.setattr(execution_panel, "run_analysis", boom)
     # _render_focus_panel 内部不调用 run_analysis，仅在点击后由按钮触发
     assert "run_analysis" not in inspect.getsource(tp._render_focus_panel)
+    # 第三页整体也不再包含执行期分析入口
+    assert "run_analysis" not in inspect.getsource(tp)
 
 
 # ============================================================
@@ -193,7 +211,8 @@ def test_normal_mode_unchanged() -> None:
     source = inspect.getsource(tp._render_actions)
     body = source.split('def _render_actions(')[1]
     assert '_render_status_form' in body
-    assert '_render_execution_panel' in body
+    assert '_render_predispatch_panel' in body
+    assert '_render_execution_panel' not in body, "执行期督办不得再出现在第三页"
     assert 'sqlite_db.get_logs' in body
     # 专注模式判定必须要求 preselect_id 非空，普通模式不受影响
     assert 'if preselect_id is not None and task_id == int(preselect_id):' in body

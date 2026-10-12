@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from agent import reminder_agent
-from database import models, sqlite_db
+from database import closure_store, models, sqlite_db
 
 # ============================================================
 # 一、动作常量
@@ -606,8 +606,9 @@ def execute(
     返回：``{"action", "applied", "task_id", "level", "days_left", "message", "task"}``
         其中 ``applied`` 表示本次是否真的改动了数据库。
 
-    异常：ValueError 动作不在允许集合内、或属于黑名单、或 params 不合法。
-        （execute 是最后一道防线，收到非法动作必须显式失败而不是静默返回。）
+    异常：ValueError 动作不在允许集合内、或属于黑名单、或 params 不合法、
+        或任务已正式闭环。
+        （execute 是最后一道防线，收到非法动作或已闭环任务必须显式失败，不得静默返回。）
     """
     if not isinstance(task, Mapping):
         raise TypeError(f"任务必须是映射类型，收到：{type(task).__name__}")
@@ -629,6 +630,17 @@ def execute(
         raise ValueError(param_error)
 
     task_id = task.get("id")
+
+    # ---------- 正式闭环闸门（最终防线）----------
+    # 已正式闭环的任务不再接受任何受控动作：不生成提醒草稿、不请求补充信息，
+    # 更不得提级修改 risk_level。判定依据是 task_closures 表是否存在记录
+    # （与 tools/task_dispatch.dispatch_task 完全同一口径）。
+    # **绝不**用 tasks.status == "completed" 代替：闭环不回写 status，二者互不蕴含。
+    if task_id is not None and closure_store.is_closed(int(task_id), db_path=db_path):
+        raise ValueError(
+            f"任务 #{task_id} 已正式闭环，不再执行任何处置动作。"
+        )
+
     level, days_left = resolve_level(task, today)
 
     if action_text == ACTION_DRAFT_NOTIFY:

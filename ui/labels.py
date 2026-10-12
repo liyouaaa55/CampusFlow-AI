@@ -86,6 +86,11 @@ LOG_ACTION_LABELS: dict[str, str] = {
     # --- 执行链路类（v2.1）---
     models.ACTION_DISPATCH: "系统内下发",
     models.ACTION_SUBMIT: "提交工作回执",
+    # --- 结果核验类（v2.2）---
+    models.ACTION_VERIFY: "结果核验",
+    models.ACTION_NEED_SUPPLEMENT: "要求补充",
+    models.ACTION_REJECT_REWORK: "驳回重办",
+    models.ACTION_CLOSE: "任务闭环",
 }
 
 
@@ -105,6 +110,26 @@ SUBMISSION_LABELS: dict[str, str] = {
     "pending_submit": "待提交",
     "submitted": "已提交",
     "overdue_unsubmitted": "已逾期未提交",
+}
+
+
+# ============================================================
+# 四之三、核验状态（v2.2）
+# ============================================================
+#
+# 为什么第三张状态表：
+#   STATUS_LABELS      → tasks.status          任务自身状态
+#   SUBMISSION_LABELS  → task_submissions 事实  负责人交没交
+#   VERIFICATION_LABELS → verifications.status  交上来的东西算不算办结
+#
+# 「已提交」不等于「已闭环」，只有 approved 才代表真正办结。
+# 三者混用会让「提交 = 完成 = 闭环」的错误语义重新出现。
+VERIFICATION_LABELS: dict[str, str] = {
+    models.VERIFICATION_PENDING: "待核验",
+    models.VERIFICATION_APPROVED: "核验通过",
+    models.VERIFICATION_NEED_SUPPLEMENT: "需补充",
+    models.VERIFICATION_REJECTED: "驳回重办",
+    models.VERIFICATION_MANUAL_REVIEW: "人工复核",
 }
 
 # 执行回执状态的展示顺序（与 SUBMISSION_LABELS 的键一一对应）
@@ -237,3 +262,125 @@ def submission_label(state: Any) -> str:
     if not key:
         return UNKNOWN_TEXT
     return SUBMISSION_LABELS.get(key, UNKNOWN_TEXT)
+
+
+# ============================================================
+# 四之二、办结标准来源（v2.2）
+# ============================================================
+#
+# 优先级由高到低：材料原文 > 静态规则 > AI 建议。
+# AI 建议在数据层被强制为「未确认」，界面上必须让督办人员一眼看出
+# 这条标准还没被确认，避免把 AI 猜测当成硬性办结要求。
+CLOSURE_SOURCE_LABELS: dict[str, str] = {
+    models.CLOSURE_SOURCE_MATERIAL: "材料明确",
+    models.CLOSURE_SOURCE_RULE: "规则推导",
+    models.CLOSURE_SOURCE_AI: "AI 建议",
+    models.CLOSURE_SOURCE_MANUAL: "人工确认",
+}
+
+# 待确认状态的统一提示（AI 来源恒为未确认）
+CLOSURE_UNCONFIRMED_HINT: str = "尚未经督办人员确认，不能作为强制办结标准。"
+
+# ============================================================
+# 核验四维度（verification_service 写入的四个布尔字段）
+# ============================================================
+
+VERIFICATION_DIMENSION_LABELS: dict[str, str] = {
+    "requirement_match": "符合办结要求",
+    "deliverable_complete": "交付物齐备",
+    "process_valid": "办理过程合规",
+    "state_consistent": "状态与材料一致",
+}
+
+# 核验四维度的固定展示顺序（与 verification_service 写入顺序一致）
+VERIFICATION_DIMENSIONS: tuple[str, ...] = (
+    "requirement_match",
+    "deliverable_complete",
+    "process_valid",
+    "state_consistent",
+)
+
+# 闭环状态（closure_service.get_closure_status 返回）
+CLOSURE_STATE_LABELS: dict[str, str] = {
+    "ready": "具备闭环条件",
+    "not_ready": "暂不具备闭环条件",
+    "closed": "已闭环",
+    "stale": "闭环依据已过期",
+}
+
+
+def verification_label(status: Any) -> str:
+    """核验状态 → 中文。取不到映射时返回占位符，不向界面泄漏英文枚举。"""
+    key = str(status or "").strip()
+    return VERIFICATION_LABELS.get(key, UNKNOWN_TEXT)
+
+
+def verification_dimension_label(field: Any) -> str:
+    """核验维度字段名 → 中文。"""
+    key = str(field or "").strip()
+    return VERIFICATION_DIMENSION_LABELS.get(key, UNKNOWN_TEXT)
+
+
+def closure_state_label(state: Any) -> str:
+    """闭环状态 → 中文。"""
+    key = str(state or "").strip()
+    return CLOSURE_STATE_LABELS.get(key, UNKNOWN_TEXT)
+
+
+def closure_source_label(source: Any) -> str:
+    """办结标准来源 → 中文。"""
+    key = str(source or "").strip()
+    return CLOSURE_SOURCE_LABELS.get(key, UNKNOWN_TEXT)
+
+
+# ============================================================
+# 下发前智能分析结论（v3.0 第一阶段）
+# ============================================================
+#
+# readiness 描述「这项任务现在能不能下发」，与提醒等级、任务状态都不同：
+#   ready            逐项核对后未发现需要额外处理的问题
+#   needs_supplement 缺少关键执行信息，需先补充
+#   risky            存在明显风险或矛盾，需管理者确认
+#   closed           已正式闭环，不再需要下发前分析
+PREDISPATCH_READINESS_LABELS: dict[str, str] = {
+    "ready": "具备下发条件",
+    "needs_supplement": "需补充关键信息",
+    "risky": "存在风险需确认",
+    "closed": "已正式闭环",
+}
+
+# 问题严重度
+ISSUE_SEVERITY_LABELS: dict[str, str] = {"high": "高", "medium": "中", "low": "低"}
+
+
+def readiness_label(value: Any) -> str:
+    """下发前分析结论 → 中文。"""
+    key = str(value or "").strip()
+    return PREDISPATCH_READINESS_LABELS.get(key, UNKNOWN_TEXT)
+
+
+def severity_label(value: Any) -> str:
+    """问题严重度 → 中文。"""
+    key = str(value or "").strip()
+    return ISSUE_SEVERITY_LABELS.get(key, UNKNOWN_TEXT)
+
+
+# ============================================================
+# 执行反馈状态（v3.0 第二阶段）
+# ============================================================
+#
+# 与 tasks.status 是**两个维度**：
+#   feedback_status 回答「管理者最近一次反馈说了什么」
+#   status          回答「任务当前执行到什么状态」
+#   "none" 是展示态（数据库中不存在该值，表示从未反馈）。
+FEEDBACK_LABELS: dict[str, str] = {
+    "none": "未反馈",
+    models.FEEDBACK_COMPLETED: "已完成",
+    models.FEEDBACK_IN_PROGRESS: "进行中",
+}
+
+
+def feedback_label(value: Any) -> str:
+    """执行反馈状态 → 中文。"""
+    key = str(value or "").strip()
+    return FEEDBACK_LABELS.get(key, UNKNOWN_TEXT)

@@ -19,7 +19,7 @@ from typing import Any, Mapping
 import streamlit as st
 
 from config import settings
-from database import sqlite_db
+from database import models, sqlite_db, task_metadata_store
 from database.sqlite_db import TaskNotFoundError
 from tools import dispatch_notice, task_dispatch
 from ui import labels
@@ -51,6 +51,9 @@ LBL_CONTENT = "完成情况"
 LBL_ATTACH = "附件"
 LBL_SUBMITTED_AT = "提交时间"
 LBL_NOT_DISPATCHED = "未下发"
+
+# 下发前分析判定「暂不具备下发条件」时的提示（由 tasks_page 传入 block_dispatch 触发）
+BLOCK_DISPATCH_HINT: str = "下发前分析发现关键执行信息缺失，已阻止直接下发（未发送任何通知）。"
 
 STATE_COLORS: dict[str, str] = {
     "pending_submit": "orange",
@@ -113,10 +116,15 @@ def _state_line(task: Mapping[str, Any], view: Mapping[str, Any]) -> None:
     )
 
 
-def render_check_window(task_id: int) -> None:
+def render_check_window(task_id: int, *, compact: bool = False) -> None:
     """工作检查窗口主体。
 
     每次进入都重新按 task_id 读库；任务不存在直接提示并返回。
+
+    compact=True（执行检查页使用）：任务名称 / 责任部门 / 负责人 / 截止时间
+    已由所在页面的顶部任务卡承载，这里不再重复渲染标题与那行字段，
+    只保留回执状态、办理内容、附件与提交入口，避免同一屏重复堆叠任务字段。
+    默认 compact=False 时行为与改造前完全一致（任务督办中心的工作检查入口）。
     """
     try:
         view = task_dispatch.task_check_view(task_id)
@@ -127,14 +135,15 @@ def render_check_window(task_id: int) -> None:
     task = view["task"]
     submission = view.get("submission")
 
-    cards.section(TITLE_CHECK, "负责人进入本窗口提交执行回执，系统据此判定提交状态")
+    if not compact:
+        cards.section(TITLE_CHECK, "负责人进入本窗口提交执行回执，系统据此判定提交状态")
 
-    st.markdown(f"**{_text(task, 'title')}**")
-    st.caption(
-        f"{LBL_DEPT}：{_text(task, 'department')}　｜　"
-        f"{LBL_OWNER}：{_text(task, 'owner')}　｜　"
-        f"{LBL_DEADLINE}：{_text(task, 'deadline')}"
-    )
+        st.markdown(f"**{_text(task, 'title')}**")
+        st.caption(
+            f"{LBL_DEPT}：{_text(task, 'department')}　｜　"
+            f"{LBL_OWNER}：{_text(task, 'owner')}　｜　"
+            f"{LBL_DEADLINE}：{_text(task, 'deadline')}"
+        )
 
     if view.get("dispatched"):
         cards.hint(["该任务已在系统内下发。"])
@@ -151,6 +160,13 @@ def render_check_window(task_id: int) -> None:
             st.caption(f"{LBL_ATTACH}：{attachment}")
         st.write("")
         # 返回按钮由 render_entry 统一提供，此处不再重复渲染
+        return
+
+    if not view.get("dispatched"):
+        st.warning(
+            "该任务尚未在系统内下发，无法提交办理回执。"
+            "请先在任务详情完成系统内下发，再进入本窗口提交结果。"
+        )
         return
 
     with st.form(f"cf_submit_form_{task_id}"):
@@ -175,9 +191,12 @@ def render_check_window(task_id: int) -> None:
                 task_id=task_id,
                 content=content,
                 file_path=attachment_path,
+                require_dispatched=True,
             )
             st.success(result["message"])
             st.rerun()
+        except task_dispatch.NotDispatchedError as exc:
+            st.error(str(exc))
         except task_dispatch.ContentRequiredError as exc:
             st.error(str(exc))
         except TaskNotFoundError:
@@ -200,23 +219,103 @@ def _render_notice_card(notice: Mapping[str, Any]) -> None:
         cards.side_card("下发信息", "字段全部取自任务表，未作任何补充或推断", rows)
 
 
+def _dispatch_record(task_id: int) -> dict[str, Any] | None:
+    """取系统内下发的日志记录（首次下发）。
+
+    只读：从 task_logs 中 action=dispatch 的存在性推导，与
+    submission_check.is_dispatched 同源，因此不可能出现「状态与实际不符」。
+    用途仅在展示真实的下发时间，不派生任何新的业务状态。
+    """
+    try:
+        for log in sqlite_db.get_logs(int(task_id)):
+            if log.get("action") == models.ACTION_DISPATCH:
+                return dict(log)
+    except Exception:
+        return None
+    return None
+
+
+def _prerequisite_rows(task: Mapping[str, Any], task_id: int) -> list[tuple[str, bool, str]]:
+    """下发前置条件 → [(条件名, 是否满足, 说明)]。
+
+    只读展示，判断口径与 task_dispatch.dispatch_block_reason 及
+    task_metadata_store 保持一致，不新增业务规则。
+    """
+    owner = str(task.get("owner") or "").strip()
+    confirmed = str(task.get("status") or "") == "confirmed" or not bool(
+        task.get("need_confirm")
+    )
+    meta = task_metadata_store.get_metadata(int(task_id))
+    criteria = list(meta.get("closure_criteria") or [])
+    if criteria and meta.get("closure_confirmed"):
+        criteria_ok, criteria_text = True, "已确认"
+    elif criteria:
+        criteria_ok, criteria_text = False, "已设置、未确认"
+    else:
+        criteria_ok, criteria_text = False, "尚未设置"
+
+    return [
+        ("任务确认", confirmed, "已确认" if confirmed else "待人工确认"),
+        ("负责人", bool(owner), owner or "未指定（未指定负责人不得下发）"),
+        ("办结标准", criteria_ok, criteria_text),
+    ]
+
+
+def _render_dispatch_prerequisites(task: Mapping[str, Any], task_id: int) -> None:
+    """下发前置条件：逐条列出满足情况，让「为什么不能下发」一眼可见。"""
+    st.markdown("**下发前置条件**")
+    for name, ok, text in _prerequisite_rows(task, task_id):
+        st.markdown(f"- {name}：{text}（{'满足' if ok else '未满足'}）")
+
+
 def render_dispatch_panel(
     task: Mapping[str, Any],
     task_id: int,
     scope: str = "list",
+    block_dispatch: bool = False,
 ) -> None:
     """任务下发面板：生成信息 → 复制 → 系统内下发 → 进入工作检查。
 
     scope 只用于区分按钮 key，避免专注模式与列表模式下 key 冲突。
+    block_dispatch=True（由下发前分析结论驱动）时，拒绝进入下发操作，
+    要求管理者先补齐关键执行信息——避免「带病下发」。
     """
     cards.section(TITLE_DISPATCH, "下发仅在系统内流转，不会通过外部渠道发送")
 
     view = task_dispatch.task_check_view(task_id)
     task = view["task"]
 
-    if not task_dispatch.can_dispatch(task):
+    _render_dispatch_prerequisites(task, task_id)
+
+    reason_block = task_dispatch.dispatch_block_reason(task)
+    if reason_block == "owner":
         # 负责人为空：禁止下发，且不猜测负责人
-        cards.hint([dispatch_notice.missing_owner_message()])
+        cards.hint(
+            [
+                dispatch_notice.missing_owner_message(),
+                "下一步：请先补齐该任务的负责人（负责人是下发的硬门槛）。",
+            ]
+        )
+        return
+    if reason_block == "need_confirm":
+        # 需要人工确认但尚未确认：禁止生成与下发，避免把未确认任务当正式内容
+        cards.hint(
+            [
+                task_dispatch.unconfirmed_message(),
+                "下一步：请先在上方完成「任务确认」，再回到此处下发。",
+            ]
+        )
+        return
+
+    if block_dispatch:
+        # 下发前分析已判定「暂不具备下发条件」：不再提供模拟下发入口，
+        # 引导管理者回到「任务信息修正」补齐后重新分析。
+        cards.hint(
+            [
+                BLOCK_DISPATCH_HINT,
+                "下一步：请在上方「任务信息修正」补齐关键执行信息，然后重新进行「下发前智能分析」。",
+            ]
+        )
         return
 
     if not str(task.get("deadline") or "").strip():
@@ -224,22 +323,77 @@ def render_dispatch_panel(
 
     _state_line(task, view)
 
-    notice_key = f"cf_dispatch_notice_{scope}_{task_id}"
-    if st.session_state.get(notice_key):
-        _render_notice_card(st.session_state[notice_key])
+    # 已下发：直接展示真实的下发状态与时间，不再摆放不可用的下发按钮。
+    # 「系统内下发」只是本系统内的状态推进，绝不等于任何外部消息已送达。
+    if view.get("dispatched"):
+        record = _dispatch_record(task_id)
+        dispatched_at = str((record or {}).get("created_at") or labels.UNKNOWN_TEXT)
+        cards.hint(
+            [
+                f"该任务已在系统内下发（下发时间：{dispatched_at}）。",
+                "无需重复下发；可点击「进入工作检查」查看或提交办理结果。",
+                "「系统内下发」仅代表本系统内的状态推进，不代表外部消息已送达。",
+            ]
+        )
+        _render_notice_actions(task, task_id, scope=scope)
+        return
 
+    notice_key = f"cf_dispatch_notice_{scope}_{task_id}"
+    notice = st.session_state.get(notice_key)
+    if notice:
+        _render_notice_card(notice)
+        # 提供可手动复制的纯文本：当前环境无法自动写入系统剪贴板，
+        # 不假装复制成功，由用户通过文本块右上角复制按钮手动复制。
+        st.code(str(notice.get("body") or ""), language="text")
+        st.caption("生成通知与复制通知都不会改变任务状态；只有点击下方「系统内下发」才推进系统内状态。")
+
+    _render_notice_actions(task, task_id, scope=scope)
+
+    if st.button(
+        BTN_DISPATCH,
+        key=f"cf_dispatch_do_{scope}_{task_id}",
+        type="primary",
+    ):
+        try:
+            result = task_dispatch.dispatch_task(task_id)
+            (st.success if not result["already"] else st.info)(result["message"])
+        except task_dispatch.OwnerRequiredError as exc:
+            st.error(str(exc))
+        except task_dispatch.NotReadyError as exc:
+            st.error(str(exc))
+        except TaskNotFoundError:
+            st.error(f"任务不存在（编号 {task_id}），下发已取消。")
+        except sqlite_db.DatabaseError:
+            st.error("下发写入失败，请稍后重试。")
+        except Exception:
+            st.error("下发失败，请稍后重试。")
+
+
+def _render_notice_actions(task: Mapping[str, Any], task_id: int, scope: str) -> None:
+    """生成通知 → 复制通知 → 进入工作检查（三列，保持既有交互与 key 规则）。"""
+    notice_key = f"cf_dispatch_notice_{scope}_{task_id}"
     left, right, third = st.columns([1, 1, 1], gap="small")
 
     with left:
         if st.button(BTN_GENERATE, key=f"cf_dispatch_gen_{scope}_{task_id}"):
             try:
-                st.session_state[notice_key] = task_dispatch.prepare_notice(task)
+                meta = task_metadata_store.get_metadata(int(task_id))
+                st.session_state[notice_key] = task_dispatch.prepare_notice(
+                    task, metadata=meta
+                )
             except task_dispatch.OwnerRequiredError as exc:
+                st.error(str(exc))
+            except task_dispatch.NotReadyError as exc:
                 st.error(str(exc))
             except Exception:
                 # 生成失败绝不阻塞下发：dispatch_notice 内部已保证有模板兜底，
                 # 走到这里只可能是极端情况，给出提示即可，不让页面白屏
                 st.error("下发信息生成失败，请稍后重试。")
+            else:
+                # 通知已写入 session_state；rerun 一次，让上方「渲染分支」
+                # （位于按钮之前）立即读到新值并展示卡片，解决「首点不显示、
+                # 需再次操作」的问题。rerun 不重复生成，也不改动任务与下发记录。
+                st.rerun()
 
     with right:
         notice = st.session_state.get(notice_key)
@@ -250,6 +404,10 @@ def render_dispatch_panel(
                 on_click=_copy_to_clipboard,
                 args=(str(notice.get("body") or ""),),
             )
+            if st.session_state.get("cf_copy_hint"):
+                st.info(
+                    "当前环境无法自动复制到剪贴板，请使用上方文本块右上角的复制按钮手动复制通知内容。"
+                )
 
     with third:
         if st.button(
@@ -260,32 +418,15 @@ def render_dispatch_panel(
         ):
             pass
 
-    already = bool(view.get("dispatched"))
-    if st.button(
-        BTN_DISPATCH,
-        key=f"cf_dispatch_do_{scope}_{task_id}",
-        disabled=already,
-        type="primary",
-    ):
-        try:
-            result = task_dispatch.dispatch_task(task_id)
-            (st.success if not result["already"] else st.info)(result["message"])
-        except task_dispatch.OwnerRequiredError as exc:
-            st.error(str(exc))
-        except TaskNotFoundError:
-            st.error(f"任务不存在（编号 {task_id}），下发已取消。")
-        except sqlite_db.DatabaseError:
-            st.error("下发写入失败，请稍后重试。")
-        except Exception:
-            st.error("下发失败，请稍后重试。")
-
 
 def _copy_to_clipboard(text: str) -> None:
-    """把下发信息写入剪贴板（失败静默，不影响页面）。"""
-    try:
-        st.session_state[NOTICE_CLIPBOARD_KEY] = text
-    except Exception:
-        pass
+    """标记用户点击过「复制下发信息」。
+
+    当前运行环境无法把文本自动写入操作系统剪贴板，因此不假装复制成功；
+    真正可用的复制由通知下方的 st.code 文本块（带浏览器复制按钮）承担，
+    用户手动复制即可。
+    """
+    st.session_state["cf_copy_hint"] = True
 
 
 def set_check_task(task_id: int) -> None:
@@ -297,6 +438,7 @@ def render_entry(
     task: Mapping[str, Any],
     task_id: int,
     scope: str = "list",
+    block_dispatch: bool = False,
 ) -> None:
     """任务详情区的统一入口：按内部开关决定显示工作检查还是下发面板。"""
     active = st.session_state.get(CHECK_TASK_KEY)
@@ -306,4 +448,4 @@ def render_entry(
             st.session_state.pop(CHECK_TASK_KEY, None)
             st.rerun()
         return
-    render_dispatch_panel(task, task_id, scope=scope)
+    render_dispatch_panel(task, task_id, scope=scope, block_dispatch=block_dispatch)

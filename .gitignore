@@ -45,3 +45,11 @@ docs/dev/_parsed/
 docs/dev/_results/
 docs/dev/_stability/
 docs/dev/_closed_loop.md
+
+# 部署包/调试产物
+*.tar.gz
+docs/dev/_*
+docs/_tmp_*
+__pycache__/
+*.pyc
+.pytest_cache/

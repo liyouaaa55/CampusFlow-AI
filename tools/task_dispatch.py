@@ -21,7 +21,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Callable
 
-from database import models, sqlite_db, submission_store
+from database import closure_store, models, sqlite_db, submission_store
 from database.sqlite_db import TaskNotFoundError, append_chain_log
 from tools import dispatch_notice, submission_check
 
@@ -36,29 +36,65 @@ class DispatchError(RuntimeError):
 
 
 class OwnerRequiredError(DispatchError):
-    """任务未指定负责人，禁止下发。"""
+    """任务未指定负责人，禁止下发（绝不猜测负责人）。"""
 
 
 class ContentRequiredError(DispatchError):
     """回执正文为空。"""
 
 
+class NotReadyError(DispatchError):
+    """任务尚未满足下发前置条件（如未人工确认、已闭环）。"""
+
+
+class NotDispatchedError(DispatchError):
+    """回执提交被拒：任务尚未在系统内下发。"""
+
+
+def dispatch_block_reason(task: dict[str, Any]) -> str | None:
+    """返回不能下发的原因键，供界面给出针对性提示；均可下发时返回 None。
+
+    仅做「不依赖数据库」的前置判断（负责人 / 是否需要确认），
+    已闭环等需读库的判断放在 dispatch_task 内（那里已有 db_path）。
+    """
+    if not dispatch_notice.dispatch_ready(task):
+        return "owner"
+    if bool(task.get("need_confirm")) and str(task.get("status") or "") != "confirmed":
+        return "need_confirm"
+    return None
+
+
 def can_dispatch(task: dict[str, Any]) -> bool:
-    """是否允许下发（负责人非空）。"""
-    return dispatch_notice.dispatch_ready(task)
+    """是否允许下发（负责人非空且已完成人工确认）。"""
+    return dispatch_block_reason(task) is None
+
+
+def unconfirmed_message() -> str:
+    """未确认任务禁止下发的提示文案。"""
+    return "该任务尚待人工确认，请先在任务详情完成确认后再下发。"
+
+
+def closed_message() -> str:
+    """已闭环任务禁止重复下发的提示文案。"""
+    return "该任务已正式闭环，不能再次下发。"
 
 
 def prepare_notice(
     task: dict[str, Any],
     llm_fn: LlmFn | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """生成下发信息（供页面预览，不落库、不改变任务）。
 
     即使 LLM 不可用也一定能返回一份可展示的通知（见 dispatch_notice）。
+    负责人缺失直接报错；需要人工确认但尚未确认的任务拒绝生成，
+    避免把未确认任务的通知当成可下发内容。
     """
-    if not can_dispatch(task):
+    if not dispatch_notice.dispatch_ready(task):
         raise OwnerRequiredError(dispatch_notice.missing_owner_message())
-    return dispatch_notice.generate_notice(task, llm_fn=llm_fn)
+    if bool(task.get("need_confirm")) and str(task.get("status") or "") != "confirmed":
+        raise NotReadyError(unconfirmed_message())
+    return dispatch_notice.generate_notice(task, llm_fn=llm_fn, metadata=metadata)
 
 
 # ============================================================
@@ -83,8 +119,18 @@ def dispatch_task(
     """
     task = _load_task(task_id, db_path)
 
-    if not can_dispatch(task):
+    if not dispatch_notice.dispatch_ready(task):
         raise OwnerRequiredError(dispatch_notice.missing_owner_message())
+    if bool(task.get("need_confirm")) and str(task.get("status") or "") != "confirmed":
+        raise NotReadyError(unconfirmed_message())
+    # 已闭环任务不能再次下发，避免意外重新打开生命周期
+    try:
+        if closure_store.get_closure(int(task_id), db_path=db_path):
+            raise NotReadyError(closed_message())
+    except NotReadyError:
+        raise
+    except Exception:
+        pass
 
     if submission_check.is_dispatched(int(task_id), db_path=db_path):
         return {
@@ -122,6 +168,7 @@ def submit_work(
     file_path: str | Path | None = None,
     submitted_at: str | None = None,
     db_path: str | Path | None = None,
+    require_dispatched: bool = False,
 ) -> dict[str, Any]:
     """提交 / 更新一条工作回执。
 
@@ -131,9 +178,18 @@ def submit_work(
     边界：
     - 任务不存在 → TaskNotFoundError（不依赖任何页面缓存的旧任务）；
     - 正文为空 → ContentRequiredError；
+    - require_dispatched=True 且任务尚未在系统内下发 → NotDispatchedError，
+      这是「正常业务路径」的强制约束，杜绝未下发任务直接提交回执；
     - 不修改 tasks 表，不触碰 task.status。
     """
     _load_task(task_id, db_path)
+
+    if require_dispatched and not submission_check.is_dispatched(
+        int(task_id), db_path=db_path
+    ):
+        raise NotDispatchedError(
+            "该任务尚未在系统内下发，无法提交办理回执。请先在任务详情完成系统内下发。"
+        )
 
     text = str(content or "").strip()
     if not text:

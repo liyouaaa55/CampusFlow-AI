@@ -90,7 +90,11 @@ html, body, [class*="st-"] {{
 .block-container {{
     padding-top: 2rem;
     padding-bottom: 2.4rem;
+    padding-left: 2.4rem;
+    padding-right: 2.4rem;
     max-width: 1240px;
+    /* 窗口比 1240px 宽时内容居中，两侧留白均匀 */
+    margin: 0 auto;
 }}
 h1, h2, h3, h4 {{
     color: {TEXT_MAIN};
@@ -408,8 +412,10 @@ h3 {{ font-size: 17px !important; }}
 .cf-hint {{
     background: #EFF6FF;
     border: 1px solid #BFDBFE;
-    border-radius: {CARD_RADIUS};
+    border-radius: 8px !important;
     padding: 14px 18px;
+    max-width: 100%;
+    box-sizing: border-box;
     color: #1E3A8A;
     font-size: 13px;
     line-height: 1.9;
@@ -605,14 +611,30 @@ section[data-testid="stSidebar"] .cf-side-row span:last-child {{
 }}
 
 /* ---------- 上传组件中文化 ---------- */
+/* 在卡片内自适应宽度（覆盖 Streamlit 内联的固定像素宽）：左为拖拽提示
+   文字、右为「选择文件」按钮，使按钮右边缘与下方示例下拉箭头右边缘
+   严格对齐（二者同处卡片内容右）；窄屏自动换行避免横向溢出。
+   注：DOM 编辑器手填的 width:40203px 属误拖，会撑爆页面，故不采用。 */
 section[data-testid="stFileUploaderDropzone"] {{
+    display: flex !important;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+    box-sizing: border-box !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 16px 20px !important;
     background: {SURFACE};
     border: 1px dashed #CBD5E1;
-    border-radius: {CARD_RADIUS};
-    padding: 20px;
+    border-radius: 8px !important;
 }}
 section[data-testid="stFileUploaderDropzone"] div[data-testid="stFileUploaderDropzoneInstructions"] > div:last-child {{
     display: none;
+}}
+/* 强制清理拖拽框内所有直接子元素（图标 / 文字 / 按钮）的原生多余外边距 */
+section[data-testid="stFileUploaderDropzone"] > * {{
+    margin: 0 !important;
 }}
 section[data-testid="stFileUploaderDropzone"] div[data-testid="stFileUploaderDropzoneInstructions"]::after {{
     content: "将文件拖拽到此处";
@@ -624,12 +646,39 @@ section[data-testid="stFileUploaderDropzone"] div[data-testid="stFileUploaderDro
 }}
 section[data-testid="stFileUploaderDropzone"] button {{
     font-size: 0;
+    flex-shrink: 0 !important;
+    /* 推到最右并外移抵消 dropzone 右内边距 20px，使按钮右边缘贴拖拽框
+       右边框；与示例下拉框箭头（同处卡片内容右）右边缘严格对齐。 */
+    margin-left: auto !important;
+    margin-right: -20px !important;
 }}
 section[data-testid="stFileUploaderDropzone"] button::after {{
     content: "选择文件";
-    font-size: 14px;
-    font-weight: 600;
-    color: {PRIMARY};
+    font-size: 13px;
+    font-weight: 500;
+    color: {TEXT_SUB};
+}}
+
+/* 示例下拉框：容器与控件均用 !important 强制 margin:0、width:100%、
+   max-width:100%，覆盖原生多余内边距，与上传拖拽框外框左右对齐、盒子
+   等宽；圆角与拖拽框、底部提示栏统一 8px。下拉箭头贴控件右边框，其
+   右边缘与「选择文件」按钮右边缘同处卡片内容右，二者严格对齐。 */
+.stSelectbox {{
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-sizing: border-box !important;
+}}
+div[data-baseweb="select"] {{
+    width: 100% !important;
+    max-width: 100% !important;
+}}
+div[data-baseweb="select"] > div {{
+    border-radius: 8px !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
 }}
 
 /* ---------- 表格与表单 ---------- */
@@ -644,6 +693,87 @@ div[data-testid="stForm"] {{
     border-radius: {CARD_RADIUS};
     padding: 18px 20px;
     box-shadow: {SHADOW};
+}}
+
+/* ---------- 上传 / 示例 / 结果 卡片容器 ----------
+   由 ui/pages/upload_page.py 用 st.container() 配合内部隐藏标记
+   (data-cf-card = upload|sample|pending) 定位，承载白色卡片外框，
+   统一页面视觉层级。Streamlit 1.37 的 st.container 不支持 key 参数，
+   故改用 :has() 锚定内部标记的方式（现代浏览器均支持）。
+   并用 :not() 排除 .block-container 的直接子块，避免整页主体被框住。 */
+[data-testid="stVerticalBlock"]:has([data-cf-card]):not(.block-container > [data-testid="stVerticalBlock"]) {{
+    box-sizing: border-box !important;
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: {CARD_RADIUS};
+    padding: 22px 26px;
+    box-shadow: {SHADOW};
+    margin: 6px 0 18px 0;
+}}
+/* 卡片内首部区块标题上边距收窄，避免卡片内再留大空白 */
+[data-testid="stVerticalBlock"]:has([data-cf-card]):not(.block-container > [data-testid="stVerticalBlock"]) .cf-section {{
+    margin-top: 0;
+}}
+
+/* ---------- 主操作按钮放大（品牌蓝填充沿用 primary） ---------- */
+.stButton > button[kind="primary"],
+.stFormSubmitButton > button[kind="primary"] {{
+    font-size: 15px !important;
+    padding: 0.55rem 1.6rem !important;
+    font-weight: 700 !important;
+}}
+
+/* ---------- 解析进度三步：序号加粗、标题与内容分层 ---------- */
+/* 顶部留 10px，与「解析完成」状态标题保持间距、不紧贴；底部收紧。 */
+.cf-parse-steps {{ margin: 10px 0 2px 0; }}
+.cf-parse-step {{
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 7px 0;
+    font-size: 14px;
+    line-height: 1.6;
+    border-bottom: 1px dashed #EDF2F7;
+}}
+.cf-parse-step:last-child {{ border-bottom: none; }}
+.cf-parse-idx {{ font-weight: 700; color: {PRIMARY}; font-size: 15px; flex: 0 0 auto; }}
+.cf-parse-title {{ font-weight: 600; color: {TEXT_MAIN}; flex: 0 0 auto; white-space: nowrap; }}
+/* 内容列可换行收缩（长文件名不撑爆布局），min-width:0 是 flex 子换行前提 */
+.cf-parse-content {{ color: {TEXT_SUB}; overflow-wrap: anywhere; min-width: 0; }}
+
+/* st.status 内容区默认有 padding-top，使 ①②③ 整体下沉、显得空。
+   去除后三步上移紧凑；与「解析完成」的间距由 .cf-parse-steps 的 margin-top 提供。 */
+[data-testid="stStatusWidget"] details > div {{
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+}}
+
+/* ---------- 底部提示栏与上传/示例卡片宽度对齐 ----------
+   上传框、示例下拉都在卡片内容区内（左右各内缩 26px），而底部
+   提示栏裸露在主容器满宽，导致三者宽度不一致。footer 容器内的
+   提示条与说明文字左右内缩 26px，与卡片内容区精确对齐；宽度均
+   为相对值，窗口缩放自动适配，不产生横向滚动条。 */
+[data-testid="stVerticalBlock"]:has([data-cf-align="footer"]):not(.block-container > [data-testid="stVerticalBlock"]) .cf-hint {{
+    padding: 14px 20px;
+    margin-left: 26px;
+    margin-right: 26px;
+}}
+[data-testid="stVerticalBlock"]:has([data-cf-align="footer"]):not(.block-container > [data-testid="stVerticalBlock"]) .cf-note {{
+    margin-left: 26px;
+    margin-right: 26px;
+}}
+
+/* ---------- 标题与步骤条与卡片内容区对齐 ----------
+   标题 / 副标题 / 步骤条原来贴着主容器左（2.4rem），而卡片内容内缩 26px，
+   导致左边界比卡片内容靠左。这里统一内缩到卡片内容区，使整页左边界一致；
+   宽度均为相对值，窗口缩放自动适配、不横向溢出。
+   h1 自带 padding-left:14px，故 margin-left:12px 合计 26px 与卡片内容对齐。 */
+[data-testid="stVerticalBlock"]:has([data-cf-align="header"]):not(.block-container > [data-testid="stVerticalBlock"]) h1 {{
+    margin-left: 12px;
+}}
+[data-testid="stVerticalBlock"]:has([data-cf-align="header"]):not(.block-container > [data-testid="stVerticalBlock"]) .cf-subtitle,
+[data-testid="stVerticalBlock"]:has([data-cf-align="header"]):not(.block-container > [data-testid="stVerticalBlock"]) .cf-steps {{
+    margin-left: 26px;
 }}
 </style>
 """
@@ -676,14 +806,35 @@ def risk_badge_html(risk: str | None) -> str:
 # 仅调整底色与边框，不隐藏任何文字或动画，保证用户能看到解析进度。
 STATUS_MARKER: str = (
     "<style>"
+    # 进度条容器去除默认外边距，避免与下方「当前待确认结果」区间隔过大
     '[data-testid="stStatusWidget"] {'
-    "background: transparent; border: none; box-shadow: none;"
+    "background: transparent; border: none; box-shadow: none; margin: 0 !important;"
     "}"
     '[data-testid="stExpander"] details {'
     "background: transparent;"
     "}"
     "</style>"
 )
+
+# st.status 展开后标题左侧的 Material 图标（testid: stExpanderIconCheck）。
+# Streamlit 1.37 未加载 Material Icons 字体，该图标会退化为英文单词
+# "check" 直接显示在界面上（实测确认），因此在此隐藏。
+#
+# 作用域：stExpanderIconCheck 是 st.status 状态图标专属的 testid，普通
+# st.expander 的展开箭头是 stExpanderIconChevron，两者不同，因此无需再用
+# 祖先选择器限定作用域。
+#
+# 历史踩坑：曾写成 `details:has(.cf-status-marker) ...`，但项目从未注入过
+# .cf-status-marker 这个类，整条规则匹配不到任何元素，修复静默失效、
+# 页面上的 "check" 单词纹丝不动。教训：锚点必须用真实存在的 testid。
+#
+# 为何不并入 STATUS_MARKER：
+#   tests/test_styles_contract.py::test_status_marker_exists 明确断言
+#   STATUS_MARKER 不得包含 display:none（防止把解析正文与动画一起藏掉）。
+#   本条只隐藏纯装饰图标，label 文字（解析完成 / 解析失败）与 ①②③ 正文
+#   均不受影响，语义上本就是两件不同的事，故单独定义并单独注入。
+STATUS_ICON_CSS: str = '<style>[data-testid="stExpanderIconCheck"] { display: none !important; }</style>'
+
 
 # 状态标签的语义配色（沿用既有语义色，不新建色系）
 TAG_TONES: dict[str, str] = {

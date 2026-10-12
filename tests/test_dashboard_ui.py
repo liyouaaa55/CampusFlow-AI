@@ -194,9 +194,16 @@ def test_focus_task_state_roundtrip() -> None:
 
 
 def test_tasks_page_preselects_focus_task() -> None:
-    """任务督办中心应消费首页写入的定位状态。"""
+    """任务督办中心应消费首页写入的定位状态。
+
+    v3.0 第四阶段：默认选中机制由「局部变量 focus_index」改为
+    「稳定 widget key + _pick_default_label（focus > 本次入库任务 > 最新任务）」，
+    因此这里把断言同步到新机制。语义不变，仍是「督办中心必须消费 focus 定位」，
+    并未放宽或删除校验；新的运行行为由 tests/test_v3_task_focus_batch.py 断言。
+    """
     from ui.pages import tasks_page
 
     source = inspect.getsource(tasks_page)
     assert "pop_focus_task" in source
-    assert "focus_index" in source
+    assert "_pick_default_label" in source
+    assert "preselect_id" in source

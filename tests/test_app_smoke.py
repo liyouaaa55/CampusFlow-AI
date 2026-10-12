@@ -29,15 +29,16 @@ def test_app_runs_without_exception(app: "AppTest") -> None:
 
 
 def test_app_has_five_pages(app: "AppTest") -> None:
-    """侧边栏导航必须包含 V2.0 规定的 5 个页面。"""
+    """侧边栏导航必须包含全部 5 个页面。
+
+    v3.0 第一阶段：原「会议材料上传」与「事项智能识别」合并为
+    「会议材料与任务生成」，页面数由 6 回到 5。
+    断言强度不变（仍是与 ui/pages/nav.py 的 PAGES 逐项精确比对）。
+    """
+    from ui.pages import nav
+
     options = list(app.radio[0].options)
-    assert options == [
-        "智能驾驶舱",
-        "会议材料上传",
-        "事项智能识别",
-        "任务督办中心",
-        "执行情况汇报",
-    ]
+    assert options == list(nav.PAGES)
 
 
 def test_homepage_renders_title(app: "AppTest") -> None:
