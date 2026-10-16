@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from agent import reminder_agent
 from database import sqlite_db
@@ -106,6 +106,8 @@ def generate_dashboard(
     top_n: int = DASHBOARD_TOP_N,
     today: Any = None,
     db_path: str | Path | None = None,
+    *,
+    exclude_task_ids: Iterable[int] | None = None,
 ) -> dict[str, Any]:
     """生成驾驶舱统计（供 Dashboard 使用）。
 
@@ -117,8 +119,12 @@ def generate_dashboard(
     说明：completed / processing 为对应状态的任务数（按状态字面统计）；
     normal / due_soon / urgent / overdue 直接取 count_levels()，其中已完成任务
     不参与等级统计（由 ReminderAgent 决定），因此四项之和可能小于 total。
+
+    exclude_task_ids：等级统计额外排除的任务 ID（如正式闭环任务，由调用方
+    以 task_closures 为权威来源传入）；total / completed / processing 等
+    普查口径不受影响。缺省 None 时行为与既有版本完全一致。
     """
-    stats = build_stats(today=today, db_path=db_path)
+    stats = build_stats(today=today, db_path=db_path, exclude_task_ids=exclude_task_ids)
     return {
         "total": stats["total"],
         "completed": stats["completed"],
@@ -198,10 +204,18 @@ def build_stats(
     department: str | None = None,
     today: Any = None,
     db_path: str | Path | None = None,
+    *,
+    exclude_task_ids: Iterable[int] | None = None,
 ) -> dict[str, Any]:
-    """聚合统计：任务明细来自 list_tasks()，提醒等级来自 count_levels()。"""
+    """聚合统计：任务明细来自 list_tasks()，提醒等级来自 count_levels()。
+
+    exclude_task_ids 只作用于提醒等级统计（排除正式闭环任务等），
+    任务明细与 completed / processing 等普查口径保持全量。
+    """
     tasks = sqlite_db.list_tasks(department=department, db_path=db_path)
-    levels = reminder_agent.count_levels(department=department, today=today, db_path=db_path)
+    levels = reminder_agent.count_levels(
+        department=department, today=today, db_path=db_path, exclude_task_ids=exclude_task_ids
+    )
 
     total = len(tasks)
     completed = _count_by_status(tasks, "completed")

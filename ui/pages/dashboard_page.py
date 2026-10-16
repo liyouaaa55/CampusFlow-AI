@@ -21,7 +21,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import pandas as pd
 import streamlit as st
@@ -182,13 +182,19 @@ def render() -> None:
     """渲染智能驾驶舱。
 
     信息层级：标题 → AI 今日主动检查 → AI 主动发现 → 任务总体情况 → 部门排行
+
+    闭环口径：正式办结以 ``task_closures`` 为权威来源（闭环不回写
+    tasks.status，与 collect_findings / execution_check 督办清单同一口径）。
+    驾驶舱所有「需要关注」类计数（banner、KPI、等级分布）都排除已正式
+    闭环的任务，保证数字与下方「AI 主动发现」清单一致。
     """
-    dashboard = report_agent.generate_dashboard()
+    closed_ids = {int(item["task_id"]) for item in closure_store.list_closures()}
+    dashboard = report_agent.generate_dashboard(exclude_task_ids=closed_ids)
 
     _render_header()
 
     st.write("")
-    _render_ai_check()
+    _render_ai_check(closed_ids)
 
     st.write("")
     _render_findings()
@@ -249,15 +255,20 @@ def _run_demo() -> None:
     state.set_flash(f"一键体验演示已识别 {len(planned)} 项事项，请确认后入库。")
     state.goto(nav.PAGE_MATERIAL)
 
-def _render_ai_check() -> None:
-    """AI 今日主动检查：总量 + 关注分类，数据全部来自真实统计。"""
-    counts = reminder_agent.count_levels()
-    total = int(counts.get("normal") or 0) + int(counts.get("due_soon") or 0) + \
-        int(counts.get("urgent") or 0) + int(counts.get("overdue") or 0)
+def _render_ai_check(closed_ids: set[int] | None = None) -> None:
+    """AI 今日主动检查：总量 + 关注分类，数据全部来自真实统计。
 
-    high_risk = len(report_agent.generate_dashboard().get("top_departments") or []) and 0
-    high_risk = _count_risk("red")
-    need_info = _count_need_confirm()
+    与「AI 主动发现」清单同口径：正式闭环任务（task_closures 有记录）
+    不计入需要关注 / 高风险 / 待补充信息——闭环不回写 tasks.status，
+    仅按 status 统计会把已办结任务算成待办，与清单自相矛盾。
+    「已检查事务」取任务库全量（含已闭环），与 KPI 描述一致。
+    """
+    excluded = closed_ids or set()
+    counts = reminder_agent.count_levels(exclude_task_ids=excluded)
+    total = len(sqlite_db.list_tasks())
+
+    high_risk = _count_risk("red", exclude_task_ids=excluded)
+    need_info = _count_need_confirm(exclude_task_ids=excluded)
     attention = int(counts.get("due_soon") or 0) + int(counts.get("urgent") or 0) + \
         int(counts.get("overdue") or 0)
 
@@ -278,14 +289,37 @@ def _render_ai_check() -> None:
     ])
 
 
-def _count_risk(risk: str, db_path: str | Path | None = None) -> int:
-    """统计指定风险等级的任务数（确定性统计，不调用大模型）。"""
-    return sum(1 for t in sqlite_db.list_tasks(db_path=db_path) if str(t.get("risk_level") or "") == risk)
+def _count_risk(
+    risk: str,
+    db_path: str | Path | None = None,
+    *,
+    exclude_task_ids: Iterable[int] | None = None,
+) -> int:
+    """统计指定风险等级的任务数（确定性统计，不调用大模型）。
+
+    exclude_task_ids：排除的任务 ID（如正式闭环任务）；缺省 None 时统计全部，
+    行为与既有版本一致。
+    """
+    excluded = {int(value) for value in exclude_task_ids} if exclude_task_ids else set()
+    return sum(
+        1
+        for t in sqlite_db.list_tasks(db_path=db_path)
+        if str(t.get("risk_level") or "") == risk and int(t.get("id") or 0) not in excluded
+    )
 
 
-def _count_need_confirm(db_path: str | Path | None = None) -> int:
-    """统计需补充信息的任务数。"""
-    return sum(1 for t in sqlite_db.list_tasks(db_path=db_path) if t.get("need_confirm"))
+def _count_need_confirm(
+    db_path: str | Path | None = None,
+    *,
+    exclude_task_ids: Iterable[int] | None = None,
+) -> int:
+    """统计需补充信息的任务数（排除正式闭环任务时传 exclude_task_ids）。"""
+    excluded = {int(value) for value in exclude_task_ids} if exclude_task_ids else set()
+    return sum(
+        1
+        for t in sqlite_db.list_tasks(db_path=db_path)
+        if t.get("need_confirm") and int(t.get("id") or 0) not in excluded
+    )
 
 
 def _render_findings() -> None:

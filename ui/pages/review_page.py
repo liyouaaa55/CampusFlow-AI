@@ -223,36 +223,82 @@ def _column_config() -> dict[str, Any]:
     }
 
 
-def _import_tasks(edited: pd.DataFrame) -> None:
-    """把人工确认后的表格写入数据库，并把「本次任务」传给任务督办中心。
+def _confirm_import(
+    edited: pd.DataFrame, *, last_fingerprint: str | None
+) -> dict[str, Any]:
+    """把人工确认后的表格写入数据库（纯编排，不依赖 Streamlit 运行时，便于单测）。
 
-    入库成功后做三件事（顺序固定）：
-        1. 用 batch_create() **真实返回**的任务 ID 作为「本次任务」的唯一依据
-           （不按标题、最大 ID、当前时间或"最后一条记录"猜测）；
-        2. 写入会话级「本次入库」记录，供第三页「本次生成的任务」视图使用；
-        3. 调用既有 focus 机制定位到本次任务，使第三页默认选中它。
-    若未拿到有效任务 ID，则不宣称成功、也不更新定位，避免误导成"已生成"。
+    会话级幂等：``last_fingerprint`` 为本会话已入库批次的内容指纹；若与本次
+    待确认内容一致，直接拒绝——**同一会话内同一批结果只允许入库一次**，
+    杜绝双击 / 重复点击 / 重新载入同一材料造成的整批重复。拒绝时不写任何
+    数据；内容不同则正常走「复核 → 入库」，并回传本次指纹供调用方记录。
+
+    返回：``{ok, reason, fingerprint, created_ids}``
     """
     tasks = _rows_to_tasks(edited)
     if not tasks:
-        st.error("没有可入库的任务（标题为空的行会被忽略）。")
-        return
+        return {
+            "ok": False,
+            "reason": "没有可入库的任务（标题为空的行会被忽略）。",
+            "fingerprint": "",
+            "created_ids": [],
+        }
+
+    fingerprint = state.compute_import_fingerprint(tasks)
+    if last_fingerprint and fingerprint and last_fingerprint == fingerprint:
+        return {
+            "ok": False,
+            "reason": (
+                "该批识别结果已入库，请勿重复确认。"
+                "如需重新导入，请修改内容或刷新页面后重试。"
+            ),
+            "fingerprint": fingerprint,
+            "created_ids": [],
+        }
 
     try:
         # 人工补齐字段后重新规划，刷新风险等级与人工确认标记
         planned = planner_agent.plan(tasks)
         created = sqlite_db.batch_create(planned)
     except (ValueError, TypeError) as exc:
-        st.error(f"入库失败：{exc}")
-        return
+        return {
+            "ok": False,
+            "reason": f"入库失败：{exc}",
+            "fingerprint": fingerprint,
+            "created_ids": [],
+        }
 
     created_ids = _created_ids(created)
     if not created_ids:
-        st.error("入库未返回有效的任务记录，本次不会更新任务定位，请核对任务列表。")
+        return {
+            "ok": False,
+            "reason": "入库未返回有效的任务记录，本次不会更新任务定位，请核对任务列表。",
+            "fingerprint": fingerprint,
+            "created_ids": [],
+        }
+    return {
+        "ok": True,
+        "reason": "",
+        "fingerprint": fingerprint,
+        "created_ids": created_ids,
+    }
+
+
+def _import_tasks(edited: pd.DataFrame) -> None:
+    """确认入库的 UI 编排：幂等守卫 → 入库 → 会话记录 → 跳转任务督办中心。
+
+    守卫只拦「同一会话内同一批待确认内容」的重复确认；不同内容（含人工
+    修正）指纹不同，正常放行——新增一条不同的真实任务，总数加一。
+    """
+    outcome = _confirm_import(edited, last_fingerprint=state.get_last_import_fingerprint())
+    if not outcome["ok"]:
+        st.error(outcome["reason"])
         return
 
+    created_ids = outcome["created_ids"]
     state.clear_parsed()
     state.set_last_import(created_ids, created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    state.set_last_import_fingerprint(outcome["fingerprint"])
     state.set_focus_task(created_ids[0])
     state.set_flash(
         f"已成功入库 {len(created_ids)} 项任务，已定位到本次生成的任务。"

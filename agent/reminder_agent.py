@@ -185,6 +185,8 @@ def check_all(
     tasks: Sequence[dict[str, Any]] | None = None,
     today: date | None = None,
     db_path: str | Path | None = None,
+    *,
+    exclude_task_ids: Iterable[int] | None = None,
 ) -> list[dict[str, Any]]:
     """扫描全部任务，返回提醒列表（按紧急程度排序）。
 
@@ -194,6 +196,9 @@ def check_all(
         tasks    可直接传入任务列表（如前端缓存），默认从 SQLite 读取
         today    基准日期，默认今天，可注入以便复算或测试
         db_path  数据库路径，默认 settings.DB_PATH
+        exclude_task_ids  额外排除的任务 ID（如正式闭环任务）：调用方以
+                 task_closures 为权威来源传入——闭环不回写 tasks.status，
+                 仅靠 status 排除会漏掉它们；缺省 None 时行为不变
     返回：
         提醒对象列表，字段见 REMINDER_FIELDS；无风险任务不返回（空列表）
     """
@@ -202,6 +207,7 @@ def check_all(
         today,
         # 未显式筛选状态时，默认跳过已完成任务
         skip_completed=status is None,
+        exclude_task_ids=exclude_task_ids,
     )
 
 
@@ -211,12 +217,15 @@ def check_department(
     tasks: Sequence[dict[str, Any]] | None = None,
     today: date | None = None,
     db_path: str | Path | None = None,
+    *,
+    exclude_task_ids: Iterable[int] | None = None,
 ) -> list[dict[str, Any]]:
     """按部门扫描，返回该部门的提醒列表（跨部门互不干扰）。"""
     return _scan(
         _load_tasks(status=status, department=department, tasks=tasks, db_path=db_path),
         today,
         skip_completed=status is None,
+        exclude_task_ids=exclude_task_ids,
     )
 
 
@@ -244,17 +253,23 @@ def count_levels(
     tasks: Sequence[dict[str, Any]] | None = None,
     today: date | None = None,
     db_path: str | Path | None = None,
+    *,
+    exclude_task_ids: Iterable[int] | None = None,
 ) -> dict[str, int]:
     """统计各提醒级别的数量，供 Dashboard 使用。
 
     返回固定四个键（无数据时为 0）：
         {"normal": 12, "due_soon": 3, "urgent": 2, "overdue": 1}
+
+    exclude_task_ids：额外排除的任务 ID（如正式闭环任务）；缺省 None 时
+    行为与既有版本完全一致。
     """
     if items is None:
         items = _scan(
             _load_tasks(status=status, department=department, tasks=tasks, db_path=db_path),
             today,
             skip_completed=status is None,
+            exclude_task_ids=exclude_task_ids,
         )
 
     counts = {level: 0 for level in REMINDER_LEVELS}
@@ -272,16 +287,19 @@ def generate_messages(
     tasks: Sequence[dict[str, Any]] | None = None,
     today: date | None = None,
     db_path: str | Path | None = None,
+    *,
+    exclude_task_ids: Iterable[int] | None = None,
 ) -> list[str]:
     """生成面向负责人的提醒文案列表（带级别标签，可直接推送或导出）。
 
-    未传入 items 时自动执行一次扫描。
+    未传入 items 时自动执行一次扫描。exclude_task_ids 语义同 check_all。
     """
     if items is None:
         items = _scan(
             _load_tasks(status=status, department=department, tasks=tasks, db_path=db_path),
             today,
             skip_completed=status is None,
+            exclude_task_ids=exclude_task_ids,
         )
     return [format_reminder_message(item) for item in items]
 
@@ -330,17 +348,24 @@ def _scan(
     tasks: Iterable[dict[str, Any]],
     today: date | None,
     skip_completed: bool = True,
+    exclude_task_ids: Iterable[int] | None = None,
 ) -> list[dict[str, Any]]:
     """对任务集合做风险扫描，返回排序后的提醒列表。
 
     skip_completed 为 True 时跳过已完成任务（默认行为）；
     调用方显式传入 status 筛选时传 False，表示以调用方的筛选为准。
+    exclude_task_ids 为需要额外排除的任务 ID 集合（如正式闭环任务）：
+    本模块只依据「任务 + 日期」做等级判定，不读 task_closures——闭环权威
+    由调用方（页面）查询后传入，保持单一职责；缺省 None 时行为不变。
     """
     base_date = today or date.today()
+    excluded = {int(value) for value in exclude_task_ids} if exclude_task_ids else set()
 
     reminders: list[dict[str, Any]] = []
     for task in tasks:
         if skip_completed and task.get("status") in EXCLUDED_STATUSES:
+            continue
+        if excluded and int(task.get("id") or 0) in excluded:
             continue
         reminder = _to_reminder(task, base_date)
         if reminder is not None:

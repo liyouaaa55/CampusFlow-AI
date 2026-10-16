@@ -6,7 +6,9 @@ database.sqlite_db.batch_create() 完成。
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+import hashlib
+import json
+from typing import Any, Mapping, Sequence
 
 import streamlit as st
 
@@ -235,9 +237,70 @@ def get_last_import_at() -> str:
 
 
 def clear_last_import() -> None:
-    """清除本次入库记录。"""
+    """清除本次入库记录（含批次内容指纹）。"""
     st.session_state.pop(KEY_LAST_IMPORT_IDS, None)
     st.session_state.pop(KEY_LAST_IMPORT_AT, None)
+    st.session_state.pop(KEY_IMPORT_FINGERPRINT, None)
+
+
+# ---------- 本会话已入库批次的内容指纹（仅当前会话，不落库）----------
+#
+# 背景：batch_create() 没有导入幂等标识，同一批待确认结果在一次会话内被
+# 重复确认（双击、重复点击、重新载入同一材料）会整批重复入库。这里用
+# 「规范化全字段内容的 sha256」作为该批次的稳定指纹：
+#     - 同一批内容 → 同一指纹 → 重复确认被可靠判定并拒绝；
+#     - 任何业务字段变化 → 不同指纹 → 合法修改与新增不受影响；
+#     - 绝不使用标题单独判定——不同任务完全可能同名。
+# 生命周期与 KEY_LAST_IMPORT_IDS 一致：只存 session_state，刷新页面或
+# 新会话即失效——因此不会永久封禁后续合法导入。
+
+KEY_IMPORT_FINGERPRINT: str = "cf_last_import_fingerprint"  # 本会话已入库批次的内容指纹
+
+# 参与指纹计算的字段：用户可见可编辑的业务字段（status 恒为默认值，不参与）
+_FINGERPRINT_FIELDS: tuple[str, ...] = (
+    "title",
+    "department",
+    "owner",
+    "deadline",
+    "priority",
+    "description",
+)
+
+
+def compute_import_fingerprint(tasks: Sequence[Mapping[str, Any]]) -> str:
+    """计算一批待确认识别结果的内容指纹（纯函数，可单测）。
+
+    规则：
+        1. 只取 _FINGERPRINT_FIELDS 六个业务字段，统一去首尾空白、缺失按空串；
+        2. **对行排序后**再哈希——调整行的展示顺序不产生新批次（宁可误拦
+           调序后的重复确认，也不放行整批重复入库）；
+        3. 空列表返回空串——调用方按「无有效内容」处理，且不与任何已入库
+           批次匹配（避免把空批次误判为重复）。
+    """
+    normalized = [
+        {field: str(task.get(field) or "").strip() for field in _FINGERPRINT_FIELDS}
+        for task in (tasks or [])
+        if isinstance(task, Mapping)
+    ]
+    normalized.sort(key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False))
+    if not normalized:
+        return ""
+    payload = json.dumps(normalized, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def get_last_import_fingerprint() -> str | None:
+    """读取本会话已入库批次的内容指纹；无记录返回 None。"""
+    value = st.session_state.get(KEY_IMPORT_FINGERPRINT)
+    return str(value) if value else None
+
+
+def set_last_import_fingerprint(fingerprint: str | None) -> None:
+    """记录本会话已入库批次的指纹（空值视为清除）。"""
+    if fingerprint:
+        st.session_state[KEY_IMPORT_FINGERPRINT] = str(fingerprint)
+    else:
+        st.session_state.pop(KEY_IMPORT_FINGERPRINT, None)
 
 
 # ---------- 下发前智能分析结果（v3.0 第一阶段）----------
